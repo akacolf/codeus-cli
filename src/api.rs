@@ -78,16 +78,16 @@ impl CodeusClient {
         }
 
         let mut stream = response.bytes_stream();
-        let mut buffer = String::new();
-        let mut assistant = String::new();
+        let mut buffer = String::with_capacity(8192);
+        let mut assistant = String::with_capacity(4096);
 
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.context("failed to read response stream")?;
             buffer.push_str(&String::from_utf8_lossy(&chunk));
 
             while let Some((split, width)) = find_sse_boundary(&buffer) {
-                let event = buffer[..split].to_string();
-                buffer = buffer[(split + width)..].to_string();
+                let event: String = buffer.drain(..split).collect();
+                buffer.drain(..width);
                 if consume_sse_event(&event, &mut assistant, &mut on_delta)? {
                     return Ok(assistant);
                 }

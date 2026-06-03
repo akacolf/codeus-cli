@@ -94,7 +94,7 @@ enum ConfigCommand {
     Unset { key: String },
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let stored = Config::load()?;
@@ -161,7 +161,8 @@ async fn run_prompt(
 }
 
 pub async fn stream_and_print(client: &CodeusClient, messages: &[Message]) -> Result<String> {
-    let mut out = io::stdout();
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
     client
         .stream_chat(messages, |delta| {
             write!(out, "{delta}")?;
