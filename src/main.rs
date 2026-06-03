@@ -1,4 +1,6 @@
+mod account;
 mod api;
+mod auth;
 mod config;
 mod repl;
 
@@ -47,10 +49,14 @@ enum Command {
     Chat(ChatArgs),
     /// Send one prompt and exit.
     Run(RunArgs),
-    /// Store a session token for future requests.
+    /// Connect Codeus CLI to a QC account.
     Login(LoginArgs),
     /// Remove the stored session token.
     Logout,
+    /// Show the signed-in QC account and usage information.
+    Account,
+    /// Show remaining usage for the signed-in QC account.
+    Usage,
     /// Inspect or update local CLI configuration.
     Config {
         #[command(subcommand)]
@@ -78,8 +84,13 @@ struct RunArgs {
 
 #[derive(Debug, Args)]
 struct LoginArgs {
+    /// Store a token directly. Intended for development and support.
     #[arg(long, env = "CODEUS_SESSION_TOKEN", hide_env_values = true)]
     token: Option<String>,
+
+    /// Print the verification URL instead of opening a browser.
+    #[arg(long)]
+    no_browser: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -106,21 +117,29 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Some(Command::Chat(args)) => {
-            let client = client_from(&globals, &stored, args.model)?;
+            let client = client_from(&globals, &stored, args.model).await?;
             repl::run(client).await
         }
         Some(Command::Run(args)) => {
-            let client = client_from(&globals, &stored, args.model)?;
+            let client = client_from(&globals, &stored, args.model).await?;
             run_prompt(client, args.prompt, args.cwd).await
         }
         Some(Command::Login(args)) => login(args).await,
         Some(Command::Logout) => logout(),
+        Some(Command::Account) => {
+            let client = client_from(&globals, &stored, None).await?;
+            account::print_account(&client).await
+        }
+        Some(Command::Usage) => {
+            let client = client_from(&globals, &stored, None).await?;
+            account::print_usage(&client).await
+        }
         Some(Command::Config { command }) => config_command(command, stored),
         None if !cli.prompt.is_empty() => {
-            let client = client_from(&globals, &stored, None)?;
+            let client = client_from(&globals, &stored, None).await?;
             run_prompt(client, cli.prompt, None).await
         }
-        None => repl::run(client_from(&globals, &stored, None)?).await,
+        None => repl::run(client_from(&globals, &stored, None).await?).await,
     }
 }
 
@@ -172,11 +191,64 @@ pub async fn stream_and_print(client: &CodeusClient, messages: &[Message]) -> Re
         .await
 }
 
-fn client_from(
+async fn client_from(
     globals: &GlobalOptions,
     stored: &Config,
     command_model: Option<String>,
 ) -> Result<CodeusClient> {
+    let mut stored = stored.clone();
+    let token = if let Some(token) = globals
+        .token
+        .clone()
+        .filter(|token| !token.trim().is_empty())
+    {
+        Some(token)
+    } else if let Some(token) = stored
+        .session_token
+        .clone()
+        .filter(|token| !token.trim().is_empty())
+        .filter(|_| !auth::token_is_expired(&stored))
+    {
+        Some(token)
+    } else if let Some(refresh_token) = stored
+        .refresh_token
+        .clone()
+        .filter(|token| !token.trim().is_empty())
+    {
+        match auth::refresh_session(
+            globals.api_base.clone(),
+            globals.model.clone(),
+            &mut stored,
+            &refresh_token,
+        )
+        .await
+        {
+            Ok(token) => Some(token),
+            Err(error) => {
+                println!("Could not refresh your Codeus session: {error}");
+                println!("Starting browser login.");
+                stored = auth::login_with_browser(
+                    globals.api_base.clone(),
+                    globals.model.clone(),
+                    &stored,
+                    false,
+                )
+                .await?;
+                stored.session_token.clone()
+            }
+        }
+    } else {
+        println!("No Codeus account is connected yet. Starting browser login.");
+        stored = auth::login_with_browser(
+            globals.api_base.clone(),
+            globals.model.clone(),
+            &stored,
+            false,
+        )
+        .await?;
+        stored.session_token.clone()
+    };
+
     let config = ClientConfig {
         api_base: globals
             .api_base
@@ -187,36 +259,26 @@ fn client_from(
             .or_else(|| globals.model.clone())
             .or_else(|| stored.model.clone())
             .unwrap_or_else(|| DEFAULT_MODEL.to_string()),
-        token: globals
-            .token
-            .clone()
-            .or_else(|| stored.session_token.clone()),
+        token,
     };
 
     CodeusClient::new(config)
 }
 
 async fn login(args: LoginArgs) -> Result<()> {
-    let token = match args.token {
-        Some(token) => token,
-        None => {
-            print!("Codeus session token: ");
-            io::stdout().flush()?;
-            let mut token = String::new();
-            io::stdin().read_line(&mut token)?;
-            token.trim().to_string()
-        }
-    };
-
-    if token.trim().is_empty() {
-        bail!("token cannot be empty");
+    if let Some(token) = args.token {
+        return auth::login_with_token(token).await;
     }
 
-    let mut config = Config::load()?;
-    config.session_token = Some(token.trim().to_string());
-    config.save()?;
+    let globals = GlobalOptions {
+        api_base: None,
+        model: None,
+        token: None,
+    };
+    let stored = Config::load()?;
+    auth::login_with_browser(globals.api_base, globals.model, &stored, args.no_browser).await?;
     println!(
-        "Saved session token to {}",
+        "Connected Codeus CLI to your QC account at {}",
         config::config_path()?.display()
     );
     Ok(())
@@ -225,6 +287,8 @@ async fn login(args: LoginArgs) -> Result<()> {
 fn logout() -> Result<()> {
     let mut config = Config::load()?;
     config.session_token = None;
+    config.refresh_token = None;
+    config.token_expires_at = None;
     config.save()?;
     println!("Removed stored session token.");
     Ok(())
@@ -238,6 +302,10 @@ fn config_command(command: ConfigCommand, mut config: Config) -> Result<()> {
                     .session_token
                     .as_ref()
                     .map(|_| "<stored>".to_string()),
+                refresh_token: config
+                    .refresh_token
+                    .as_ref()
+                    .map(|_| "<stored>".to_string()),
                 ..config
             };
             print!("{}", toml::to_string_pretty(&display)?);
@@ -248,6 +316,14 @@ fn config_command(command: ConfigCommand, mut config: Config) -> Result<()> {
                 "api_base" => config.api_base = Some(value),
                 "model" => config.model = Some(value),
                 "session_token" | "token" => config.session_token = Some(value),
+                "refresh_token" => config.refresh_token = Some(value),
+                "token_expires_at" => {
+                    config.token_expires_at = Some(
+                        value
+                            .parse()
+                            .context("token_expires_at must be a Unix timestamp")?,
+                    )
+                }
                 _ => bail!("unknown config key: {key}"),
             }
             config.save()?;
@@ -257,6 +333,8 @@ fn config_command(command: ConfigCommand, mut config: Config) -> Result<()> {
                 "api_base" => config.api_base = None,
                 "model" => config.model = None,
                 "session_token" | "token" => config.session_token = None,
+                "refresh_token" => config.refresh_token = None,
+                "token_expires_at" => config.token_expires_at = None,
                 _ => bail!("unknown config key: {key}"),
             }
             config.save()?;

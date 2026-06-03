@@ -11,6 +11,8 @@ pub struct Config {
     pub api_base: Option<String>,
     pub model: Option<String>,
     pub session_token: Option<String>,
+    pub refresh_token: Option<String>,
+    pub token_expires_at: Option<u64>,
 }
 
 impl Config {
