@@ -66,6 +66,57 @@ cargo build --release
 
 Bun is useful for TypeScript projects, but it is not needed here unless the project later adds a separate web UI or packaging tool that justifies a JavaScript runtime.
 
+## Vercel API proxy
+
+The repo also includes Vercel Functions for the hosted `/v1` API surface the CLI expects:
+
+```text
+/v1/auth/device/code
+/v1/auth/device/token
+/v1/auth/refresh
+/v1/chat/completions
+/v1/account
+/v1/usage
+```
+
+Deploy this repo to Vercel, set the server-side environment variables, then point the CLI at the deployment:
+
+```bash
+vercel pull --yes --environment preview
+vercel deploy
+codeus config set api_base https://your-codeus-api.vercel.app/v1
+codeus login
+```
+
+Required Vercel environment variables:
+
+```bash
+CODEUS_AUTH_BASE=https://your-qc-auth-service.example.com
+CODEUS_CHAT_BASE=https://your-openai-compatible-chat-service.example.com/v1
+```
+
+Optional exact upstream URL overrides:
+
+```bash
+CODEUS_DEVICE_CODE_URL=https://your-qc-auth-service.example.com/oauth/device/code
+CODEUS_DEVICE_TOKEN_URL=https://your-qc-auth-service.example.com/oauth/token
+CODEUS_REFRESH_URL=https://your-qc-auth-service.example.com/oauth/token
+CODEUS_ACCOUNT_URL=https://your-qc-auth-service.example.com/account
+CODEUS_USAGE_URL=https://your-qc-auth-service.example.com/usage
+CODEUS_CHAT_COMPLETIONS_URL=https://your-openai-compatible-chat-service.example.com/v1/chat/completions
+```
+
+Optional secret/provider settings:
+
+```bash
+CODEUS_OAUTH_CLIENT_ID=codeus-cli
+CODEUS_OAUTH_SCOPE="chat account usage"
+CODEUS_CHAT_API_KEY=server-side-provider-or-gateway-key
+CODEUS_ACCOUNT_BASE=https://your-qc-account-service.example.com
+```
+
+If `CODEUS_CHAT_API_KEY` is set, Vercel sends it to the chat upstream and forwards the user's Codeus session as `x-codeus-session-token`. If it is not set, Vercel forwards the user's bearer token as `Authorization`.
+
 ## Roadmap
 
 - Local workspace tools with explicit approval
