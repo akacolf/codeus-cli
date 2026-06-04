@@ -5,20 +5,20 @@ class Codeus < Formula
 
   on_macos do
     if Hardware::CPU.arm?
-      url "https://github.com/quantumclub/codeus-cli/releases/download/v#{version}/codeus-aarch64-apple-darwin.tar.gz"
+      url "https://github.com/atomicfield/codeus-cli/releases/download/v#{version}/codeus-aarch64-apple-darwin.tar.gz"
       sha256 "{{SHA256_AARCH64_APPLE_DARWIN}}"
     else
-      url "https://github.com/quantumclub/codeus-cli/releases/download/v#{version}/codeus-x86_64-apple-darwin.tar.gz"
+      url "https://github.com/atomicfield/codeus-cli/releases/download/v#{version}/codeus-x86_64-apple-darwin.tar.gz"
       sha256 "{{SHA256_X86_64_APPLE_DARWIN}}"
     end
   end
 
   on_linux do
     if Hardware::CPU.arm?
-      url "https://github.com/quantumclub/codeus-cli/releases/download/v#{version}/codeus-aarch64-unknown-linux-musl.tar.gz"
+      url "https://github.com/atomicfield/codeus-cli/releases/download/v#{version}/codeus-aarch64-unknown-linux-musl.tar.gz"
       sha256 "{{SHA256_AARCH64_UNKNOWN_LINUX_MUSL}}"
     else
-      url "https://github.com/quantumclub/codeus-cli/releases/download/v#{version}/codeus-x86_64-unknown-linux-musl.tar.gz"
+      url "https://github.com/atomicfield/codeus-cli/releases/download/v#{version}/codeus-x86_64-unknown-linux-musl.tar.gz"
       sha256 "{{SHA256_X86_64_UNKNOWN_LINUX_MUSL}}"
     end
   end

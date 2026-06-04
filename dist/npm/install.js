@@ -5,7 +5,7 @@ const { basename, join } = require("node:path")
 const { spawnSync } = require("node:child_process")
 const https = require("node:https")
 
-const repo = process.env.CODEUS_REPO || "quantumclub/codeus-cli"
+const repo = process.env.CODEUS_REPO || "atomicfield/codeus-cli"
 const version = process.env.CODEUS_VERSION || require("./package.json").version
 const base =
   version === "0.0.0-dev" || version === "latest"

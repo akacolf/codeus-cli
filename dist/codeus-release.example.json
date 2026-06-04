@@ -1,7 +1,7 @@
 {
   "version": "0.1.0",
-  "url": "https://github.com/quantumclub/codeus-cli/releases/tag/v0.1.0",
-  "notes_url": "https://github.com/quantumclub/codeus-cli/releases/tag/v0.1.0",
+  "url": "https://github.com/atomicfield/codeus-cli/releases/tag/v0.1.0",
+  "notes_url": "https://github.com/atomicfield/codeus-cli/releases/tag/v0.1.0",
   "install": {
     "curl": "Update with: curl -fsSL https://install.quantumclub.sh/codeus.sh | sh",
     "homebrew": "Update with: brew update && brew upgrade quantumclub/tap/codeus",

@@ -1,6 +1,6 @@
 $ErrorActionPreference = "Stop"
 
-$Repo = if ($env:CODEUS_REPO) { $env:CODEUS_REPO } else { "quantumclub/codeus-cli" }
+$Repo = if ($env:CODEUS_REPO) { $env:CODEUS_REPO } else { "atomicfield/codeus-cli" }
 $Version = if ($env:CODEUS_VERSION) { $env:CODEUS_VERSION } else { "latest" }
 $InstallDir = if ($env:CODEUS_INSTALL_DIR) { $env:CODEUS_INSTALL_DIR } else { Join-Path $HOME ".codeus\bin" }
 $BinName = if ($env:CODEUS_BIN_NAME) { $env:CODEUS_BIN_NAME } else { "codeus.exe" }

@@ -4,6 +4,7 @@ use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
@@ -123,6 +124,8 @@ impl CodeusClient {
 
         let http = reqwest::Client::builder()
             .default_headers(headers)
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(120))
             .build()
             .context("failed to build HTTP client")?;
 
@@ -251,7 +254,12 @@ impl CodeusClient {
 
             let value: Value =
                 serde_json::from_str(&text).context("failed to parse browser login response")?;
-            return parse_device_authorization(value);
+            let mut auth = parse_device_authorization(value)?;
+            auth.verification_uri = with_cli_client_hint(&auth.verification_uri);
+            auth.verification_uri_complete = auth
+                .verification_uri_complete
+                .map(|url| with_cli_client_hint(&url));
+            return Ok(auth);
         }
 
         Err(anyhow!(
@@ -282,7 +290,13 @@ impl CodeusClient {
             let value: Value = serde_json::from_str(&text).unwrap_or_else(|_| json!({}));
 
             if status.is_success() {
-                return Ok(DeviceTokenStatus::Authorized(parse_token_set(value)?));
+                if value.get("status").and_then(Value::as_str) == Some("pending") {
+                    return Ok(DeviceTokenStatus::Pending);
+                }
+                let token = parse_token_set(value).with_context(|| {
+                    "browser approval completed, but the QC API did not return a CLI session token"
+                })?;
+                return Ok(DeviceTokenStatus::Authorized(token));
             }
 
             if status == StatusCode::ACCEPTED {
@@ -511,6 +525,15 @@ fn expires_in_field(value: &Value) -> Option<u64> {
 
     let now_secs = now_ms / 1000;
     Some(expires_at.saturating_sub(now_secs).max(1))
+}
+
+fn with_cli_client_hint(url: &str) -> String {
+    if url.contains("client=cli") {
+        return url.to_string();
+    }
+
+    let separator = if url.contains('?') { '&' } else { '?' };
+    format!("{url}{separator}client=cli")
 }
 
 fn find_sse_boundary(buffer: &str) -> Option<(usize, usize)> {
@@ -756,6 +779,18 @@ mod tests {
         );
         assert_eq!(auth.interval, 2);
         assert!(auth.expires_in > 0);
+    }
+
+    #[test]
+    fn appends_cli_client_hint_to_link_url() {
+        assert_eq!(
+            with_cli_client_hint("https://quantumclub.sh/account/link?code=ABCD2345"),
+            "https://quantumclub.sh/account/link?code=ABCD2345&client=cli"
+        );
+        assert_eq!(
+            with_cli_client_hint("https://quantumclub.sh/account/link?code=ABCD2345&client=cli"),
+            "https://quantumclub.sh/account/link?code=ABCD2345&client=cli"
+        );
     }
 
     #[test]

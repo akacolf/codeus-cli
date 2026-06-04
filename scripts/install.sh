@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-REPO="${CODEUS_REPO:-quantumclub/codeus-cli}"
+REPO="${CODEUS_REPO:-atomicfield/codeus-cli}"
 VERSION="${CODEUS_VERSION:-latest}"
 INSTALL_DIR="${CODEUS_INSTALL_DIR:-$HOME/.local/bin}"
 BIN_NAME="${CODEUS_BIN_NAME:-codeus}"

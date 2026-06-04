@@ -81,7 +81,7 @@ Recommended behavior:
 The default metadata URL is:
 
 ```text
-https://github.com/quantumclub/codeus-cli/releases/latest/download/codeus-release.json
+https://github.com/atomicfield/codeus-cli/releases/latest/download/codeus-release.json
 ```
 
 Self-replacement for direct binary installs should wait until we add atomic replacement and rollback. Package-manager installs should defer to the package manager.

@@ -4,7 +4,7 @@ use serde::Deserialize;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const DEFAULT_UPDATE_ENDPOINT: &str =
-    "https://github.com/quantumclub/codeus-cli/releases/latest/download/codeus-release.json";
+    "https://github.com/atomicfield/codeus-cli/releases/latest/download/codeus-release.json";
 const CHECK_INTERVAL_SECS: u64 = 60 * 60 * 24;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -97,7 +97,7 @@ fn update_command(release: &ReleaseInfo, channel: InstallChannel) -> String {
             .clone()
             .unwrap_or_else(|| "Update with: npm install -g @quantumclub/codeus@latest".to_string()),
         InstallChannel::Cargo => {
-            "Update with: cargo install --git https://github.com/quantumclub/codeus-cli codeus --locked --force".to_string()
+            "Update with: cargo install --git https://github.com/atomicfield/codeus-cli codeus --locked --force".to_string()
         }
         InstallChannel::Direct | InstallChannel::Unknown => release.install.curl.clone().unwrap_or_else(|| {
             "Update with: curl -fsSL https://install.quantumclub.sh/codeus.sh | sh".to_string()

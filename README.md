@@ -152,7 +152,7 @@ CODEUS_API_BASE=https://api.quantumclub.sh/v1
 CODEUS_MODEL=sonnet-4.6
 CODEUS_SESSION_TOKEN=...
 CODEUS_NO_UPDATE_CHECK=1
-CODEUS_UPDATE_ENDPOINT=https://github.com/quantumclub/codeus-cli/releases/latest/download/codeus-release.json
+CODEUS_UPDATE_ENDPOINT=https://github.com/atomicfield/codeus-cli/releases/latest/download/codeus-release.json
 ```
 
 The CLI sends `Authorization: Bearer <token>` after the QC browser login completes. Browser login uses the website-backed device-link API:

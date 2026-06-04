@@ -515,11 +515,9 @@ fn print_welcome(terminal: &Terminal, client: &CodeusClient, session: &Session) 
         String::new(),
     ]);
     left.extend([
-        "   ____          __                ".to_string(),
-        "  / ___|___   __| | ___ _   _ ___ ".to_string(),
-        " | |   / _ \\ / _` |/ _ \\ | | / __|".to_string(),
-        " | |__| (_) | (_| |  __/ |_| \\__ \\".to_string(),
-        "  \\____\\___/ \\__,_|\\___|\\__,_|___/".to_string(),
+        String::new(),
+        "              </>".to_string(),
+        String::new(),
     ]);
     left.extend([
         String::new(),
@@ -690,12 +688,6 @@ async fn login_from_repl(
                 "{} Browser login could not start: {error}",
                 terminal.warn("!")
             );
-            println!(
-                "{}",
-                terminal.muted(
-                    "Verify CODEUS_API_BASE points at https://api.quantumclub.sh/v1, or use `codeus login --token ...` for development/support."
-                )
-            );
         }
     }
 
@@ -731,7 +723,7 @@ fn print_split_panel(terminal: &Terminal, left: &[String], right: &[String]) {
         let left_cell = pad_cell(left_value, LEFT_WIDTH);
         let right_cell = pad_cell(right_value, RIGHT_WIDTH);
 
-        let left_cell = if left_value.contains("___") || left_value.contains("| |") {
+        let left_cell = if left_value.contains("</>") {
             terminal.accent(&left_cell)
         } else {
             left_cell
