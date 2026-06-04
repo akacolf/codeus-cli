@@ -1,4 +1,4 @@
-# Codeus CLI
+## Codeus CLI
 
 Terminal-native Codeus for working with QC's hosted agent service without the desktop app distribution surface.
 
