@@ -13,18 +13,26 @@ pub struct Config {
     pub session_token: Option<String>,
     pub refresh_token: Option<String>,
     pub token_expires_at: Option<u64>,
+    pub theme: Option<String>,
+    pub font: Option<String>,
+    pub approved_command_prefixes: Option<Vec<Vec<String>>>,
+    pub onboarded: Option<bool>,
 }
 
 impl Config {
     pub fn load() -> Result<Self> {
         let path = config_path()?;
-        if !path.exists() {
+        let read_path = if path.exists() {
+            path
+        } else if let Some(legacy) = legacy_config_path().filter(|legacy| legacy.exists()) {
+            legacy
+        } else {
             return Ok(Self::default());
-        }
+        };
 
-        let raw = fs::read_to_string(&path)
-            .with_context(|| format!("failed to read config at {}", path.display()))?;
-        toml::from_str(&raw).with_context(|| format!("failed to parse {}", path.display()))
+        let raw = fs::read_to_string(&read_path)
+            .with_context(|| format!("failed to read config at {}", read_path.display()))?;
+        toml::from_str(&raw).with_context(|| format!("failed to parse {}", read_path.display()))
     }
 
     pub fn save(&self) -> Result<()> {
@@ -50,6 +58,17 @@ impl Config {
 }
 
 pub fn config_path() -> Result<PathBuf> {
-    let base = dirs::config_dir().context("could not locate user config directory")?;
-    Ok(base.join("codeus").join("config.toml"))
+    let base = dirs::home_dir().context("could not locate user home directory")?;
+    Ok(base.join(".config").join("codeus").join("config.toml"))
+}
+
+fn legacy_config_path() -> Option<PathBuf> {
+    let legacy = dirs::config_dir()?.join("codeus").join("config.toml");
+    let primary = config_path().ok()?;
+
+    if legacy == primary {
+        None
+    } else {
+        Some(legacy)
+    }
 }

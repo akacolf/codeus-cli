@@ -2,8 +2,16 @@ mod account;
 mod api;
 mod auth;
 mod config;
+mod context;
+mod harness;
+mod input;
+mod onboarding;
 mod repl;
+mod telemetry;
 mod terminal;
+mod thread_store;
+mod tool_protocol;
+mod tools;
 
 use anyhow::{bail, Context, Result};
 use api::{ClientConfig, CodeusClient, Message};
@@ -124,6 +132,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Some(Command::Chat(args)) => {
+            let stored = maybe_onboard(&globals, stored, args.model.clone()).await?;
             let client = client_from(&globals, &stored, args.model, AuthMode::Passive).await?;
             repl::run(client).await
         }
@@ -146,7 +155,10 @@ async fn main() -> Result<()> {
             let client = client_from(&globals, &stored, None, AuthMode::Required).await?;
             run_prompt(client, cli.prompt, None).await
         }
-        None => repl::run(client_from(&globals, &stored, None, AuthMode::Passive).await?).await,
+        None => {
+            let stored = maybe_onboard(&globals, stored, None).await?;
+            repl::run(client_from(&globals, &stored, None, AuthMode::Passive).await?).await
+        }
     }
 }
 
@@ -165,21 +177,9 @@ async fn run_prompt(
         .canonicalize()
         .context("failed to resolve working directory")?;
 
-    let system = format!(
-        "You are Codeus CLI, QC's terminal-native coding assistant. The user's current working directory is {}. Be concise, practical, and cite files when relevant.",
-        cwd.display()
-    );
+    let context = context::build_context(&cwd, None)?;
 
-    let messages = vec![
-        Message {
-            role: "system".to_string(),
-            content: system,
-        },
-        Message {
-            role: "user".to_string(),
-            content: prompt,
-        },
-    ];
+    let messages = vec![context.system, Message::new("user", prompt)];
 
     stream_and_print(&client, &messages).await?;
     println!();
@@ -263,6 +263,23 @@ async fn client_from(
     CodeusClient::new(config)
 }
 
+async fn maybe_onboard(
+    globals: &GlobalOptions,
+    stored: Config,
+    command_model: Option<String>,
+) -> Result<Config> {
+    if !onboarding::should_run(&stored) || globals.token.is_some() {
+        return Ok(stored);
+    }
+
+    onboarding::run(
+        globals.api_base.clone(),
+        command_model.or_else(|| globals.model.clone()),
+        stored,
+    )
+    .await
+}
+
 async fn login(args: LoginArgs) -> Result<()> {
     if let Some(token) = args.token {
         return auth::login_with_token(token).await;
@@ -315,8 +332,10 @@ fn config_command(command: ConfigCommand, mut config: Config) -> Result<()> {
             match key.as_str() {
                 "api_base" => config.api_base = Some(value),
                 "model" => config.model = Some(value),
+                "theme" => config.theme = Some(value),
                 "session_token" | "token" => config.session_token = Some(value),
                 "refresh_token" => config.refresh_token = Some(value),
+                "font" => config.font = Some(value),
                 "token_expires_at" => {
                     config.token_expires_at = Some(
                         value
@@ -332,8 +351,10 @@ fn config_command(command: ConfigCommand, mut config: Config) -> Result<()> {
             match key.as_str() {
                 "api_base" => config.api_base = None,
                 "model" => config.model = None,
+                "theme" => config.theme = None,
                 "session_token" | "token" => config.session_token = None,
                 "refresh_token" => config.refresh_token = None,
+                "font" => config.font = None,
                 "token_expires_at" => config.token_expires_at = None,
                 _ => bail!("unknown config key: {key}"),
             }

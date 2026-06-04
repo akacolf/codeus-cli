@@ -9,6 +9,59 @@ use serde_json::{json, Value};
 pub struct Message {
     pub role: String,
     pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ChatToolCall>>,
+}
+
+impl Message {
+    pub fn new(role: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: role.into(),
+            content: content.into(),
+            tool_call_id: None,
+            tool_calls: None,
+        }
+    }
+
+    pub fn assistant_tool_calls(tool_calls: Vec<ChatToolCall>) -> Self {
+        Self {
+            role: "assistant".to_string(),
+            content: String::new(),
+            tool_call_id: None,
+            tool_calls: Some(tool_calls),
+        }
+    }
+
+    pub fn tool_result(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: "tool".to_string(),
+            content: content.into(),
+            tool_call_id: Some(tool_call_id.into()),
+            tool_calls: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatToolCall {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub function: ChatToolFunction,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatToolFunction {
+    pub name: String,
+    pub arguments: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChatCompletion {
+    pub content: String,
+    pub tool_calls: Vec<ChatToolCall>,
 }
 
 #[derive(Debug, Clone)]
@@ -80,7 +133,34 @@ impl CodeusClient {
         &self.config
     }
 
-    pub async fn stream_chat<F>(&self, messages: &[Message], mut on_delta: F) -> Result<String>
+    pub async fn stream_chat<F>(&self, messages: &[Message], on_delta: F) -> Result<String>
+    where
+        F: FnMut(&str) -> Result<()>,
+    {
+        Ok(self
+            .stream_chat_with_tools(messages, false, on_delta)
+            .await?
+            .content)
+    }
+
+    pub async fn stream_chat_completion<F>(
+        &self,
+        messages: &[Message],
+        mut on_delta: F,
+    ) -> Result<ChatCompletion>
+    where
+        F: FnMut(&str) -> Result<()>,
+    {
+        self.stream_chat_with_tools(messages, true, &mut on_delta)
+            .await
+    }
+
+    async fn stream_chat_with_tools<F>(
+        &self,
+        messages: &[Message],
+        include_tools: bool,
+        mut on_delta: F,
+    ) -> Result<ChatCompletion>
     where
         F: FnMut(&str) -> Result<()>,
     {
@@ -89,11 +169,15 @@ impl CodeusClient {
             self.config.api_base.trim_end_matches('/')
         );
 
-        let body = json!({
+        let mut body = json!({
             "model": normalize_model(&self.config.model),
             "stream": true,
             "messages": messages,
         });
+        if include_tools {
+            body["tools"] = local_tool_schemas();
+            body["tool_choice"] = json!("auto");
+        }
 
         let response = self
             .http
@@ -111,7 +195,7 @@ impl CodeusClient {
 
         let mut stream = response.bytes_stream();
         let mut buffer = String::with_capacity(8192);
-        let mut assistant = String::with_capacity(4096);
+        let mut completion = StreamingCompletion::default();
 
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.context("failed to read response stream")?;
@@ -120,17 +204,17 @@ impl CodeusClient {
             while let Some((split, width)) = find_sse_boundary(&buffer) {
                 let event: String = buffer.drain(..split).collect();
                 buffer.drain(..width);
-                if consume_sse_event(&event, &mut assistant, &mut on_delta)? {
-                    return Ok(assistant);
+                if consume_sse_event(&event, &mut completion, &mut on_delta)? {
+                    return Ok(completion.finish());
                 }
             }
         }
 
         if !buffer.trim().is_empty() {
-            let _ = consume_sse_event(&buffer, &mut assistant, &mut on_delta)?;
+            let _ = consume_sse_event(&buffer, &mut completion, &mut on_delta)?;
         }
 
-        Ok(assistant)
+        Ok(completion.finish())
     }
 
     pub async fn begin_device_login(&self) -> Result<DeviceAuthorization> {
@@ -369,7 +453,50 @@ fn find_sse_boundary(buffer: &str) -> Option<(usize, usize)> {
     }
 }
 
-fn consume_sse_event<F>(event: &str, assistant: &mut String, on_delta: &mut F) -> Result<bool>
+#[derive(Debug, Default)]
+struct StreamingCompletion {
+    content: String,
+    tool_calls: Vec<StreamingToolCall>,
+}
+
+#[derive(Debug, Default, Clone)]
+struct StreamingToolCall {
+    id: String,
+    kind: String,
+    name: String,
+    arguments: String,
+}
+
+impl StreamingCompletion {
+    fn finish(self) -> ChatCompletion {
+        ChatCompletion {
+            content: self.content,
+            tool_calls: self
+                .tool_calls
+                .into_iter()
+                .filter(|call| !call.name.is_empty())
+                .map(|call| ChatToolCall {
+                    id: call.id,
+                    kind: if call.kind.is_empty() {
+                        "function".to_string()
+                    } else {
+                        call.kind
+                    },
+                    function: ChatToolFunction {
+                        name: call.name,
+                        arguments: call.arguments,
+                    },
+                })
+                .collect(),
+        }
+    }
+}
+
+fn consume_sse_event<F>(
+    event: &str,
+    completion: &mut StreamingCompletion,
+    on_delta: &mut F,
+) -> Result<bool>
 where
     F: FnMut(&str) -> Result<()>,
 {
@@ -391,12 +518,116 @@ where
             .pointer("/choices/0/delta/content")
             .and_then(|value| value.as_str())
         {
-            assistant.push_str(delta);
+            completion.content.push_str(delta);
             on_delta(delta)?;
+        }
+        if let Some(tool_calls) = parsed
+            .pointer("/choices/0/delta/tool_calls")
+            .and_then(|value| value.as_array())
+        {
+            for tool_call in tool_calls {
+                merge_streaming_tool_call(completion, tool_call);
+            }
         }
     }
 
     Ok(false)
+}
+
+fn merge_streaming_tool_call(completion: &mut StreamingCompletion, value: &Value) {
+    let index = value.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+    while completion.tool_calls.len() <= index {
+        completion.tool_calls.push(StreamingToolCall::default());
+    }
+
+    let target = &mut completion.tool_calls[index];
+    if let Some(id) = value.get("id").and_then(Value::as_str) {
+        target.id.push_str(id);
+    }
+    if let Some(kind) = value.get("type").and_then(Value::as_str) {
+        target.kind.push_str(kind);
+    }
+    if let Some(name) = value.pointer("/function/name").and_then(Value::as_str) {
+        target.name.push_str(name);
+    }
+    if let Some(arguments) = value.pointer("/function/arguments").and_then(Value::as_str) {
+        target.arguments.push_str(arguments);
+    }
+}
+
+fn local_tool_schemas() -> Value {
+    json!([
+        {
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "description": "Read a UTF-8-ish text file under the active workspace.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string" }
+                    },
+                    "required": ["path"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "search_text",
+                "description": "Search for literal text under the active workspace.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pattern": { "type": "string" },
+                        "path": { "type": "string" }
+                    },
+                    "required": ["pattern"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "git_status",
+                "description": "Inspect git status for the active workspace.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "git_diff",
+                "description": "Inspect git diff stat for the active workspace.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "run_command",
+                "description": "Run a local command only if it matches an approved argv prefix.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "command": { "type": "string" }
+                    },
+                    "required": ["command"],
+                    "additionalProperties": false
+                }
+            }
+        }
+    ])
 }
 
 fn normalize_model(model: &str) -> &str {
@@ -447,5 +678,33 @@ mod tests {
         assert_eq!(token.session_token, "session-123");
         assert_eq!(token.refresh_token.as_deref(), Some("refresh-123"));
         assert_eq!(token.expires_in, Some(3600));
+    }
+
+    #[test]
+    fn parses_streamed_tool_call_deltas() {
+        let mut completion = StreamingCompletion::default();
+        let mut deltas = String::new();
+        let event = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{\"path\""}}]}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":":\"README.md\"}"}}]}}]}
+
+data: [DONE]"#;
+
+        let done = consume_sse_event(event, &mut completion, &mut |delta| {
+            deltas.push_str(delta);
+            Ok(())
+        })
+        .unwrap();
+        let finished = completion.finish();
+
+        assert!(done);
+        assert!(deltas.is_empty());
+        assert_eq!(finished.tool_calls.len(), 1);
+        assert_eq!(finished.tool_calls[0].id, "call_1");
+        assert_eq!(finished.tool_calls[0].function.name, "read_file");
+        assert_eq!(
+            finished.tool_calls[0].function.arguments,
+            r#"{"path":"README.md"}"#
+        );
     }
 }

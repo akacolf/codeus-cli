@@ -1,5 +1,6 @@
 use crate::api::{ClientConfig, CodeusClient, DeviceAuthorization, DeviceTokenStatus, TokenSet};
 use crate::config::{Config, DEFAULT_API_BASE, DEFAULT_MODEL};
+use crate::terminal::Terminal;
 use anyhow::{bail, Context, Result};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -35,7 +36,7 @@ pub async fn login_with_browser(
     })?;
 
     let auth = auth_client.begin_device_login().await?;
-    print_device_instructions(&auth, no_browser);
+    print_device_instructions(&auth, no_browser, stored.theme.as_deref());
     let token = wait_for_device_token(&auth_client, &auth).await?;
 
     let mut config = Config::load()?;
@@ -79,27 +80,46 @@ pub fn token_is_expired(config: &Config) -> bool {
     now.as_secs().saturating_add(60) >= expires_at
 }
 
-fn print_device_instructions(auth: &DeviceAuthorization, no_browser: bool) {
+fn print_device_instructions(auth: &DeviceAuthorization, no_browser: bool, theme: Option<&str>) {
+    let terminal = Terminal::detect_with_theme(theme);
     let url = auth
         .verification_uri_complete
         .as_deref()
         .unwrap_or(&auth.verification_uri);
 
-    println!("Sign in to your QC account to connect Codeus CLI:");
+    println!();
+    println!(
+        "{}",
+        terminal.title("Sign in to your QC account to connect Codeus CLI")
+    );
     if let Some(message) = &auth.message {
         println!("{message}");
     } else {
+        println!(
+            "{}",
+            terminal.muted("Browser did not open? Use the URL below to sign in.")
+        );
+        println!();
         println!("{url}");
         if let Some(user_code) = &auth.user_code {
-            println!("Code: {user_code}");
+            println!();
+            println!("Use code: {}", terminal.selection(user_code));
         }
     }
 
     if !no_browser {
         match open_browser(url) {
-            Ok(()) => println!("Opened your browser. Waiting for approval..."),
-            Err(error) => println!("Could not open a browser automatically: {error}"),
+            Ok(()) => println!(
+                "{}",
+                terminal.muted("Opened your browser. Waiting for approval...")
+            ),
+            Err(error) => println!(
+                "{} Could not open a browser automatically: {error}",
+                terminal.warn("!")
+            ),
         }
+    } else {
+        println!("{}", terminal.muted("Waiting for browser approval..."));
     }
 }
 
