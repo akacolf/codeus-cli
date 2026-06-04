@@ -76,6 +76,10 @@ impl CodeusClient {
         Ok(Self { http, config })
     }
 
+    pub fn config(&self) -> &ClientConfig {
+        &self.config
+    }
+
     pub async fn stream_chat<F>(&self, messages: &[Message], mut on_delta: F) -> Result<String>
     where
         F: FnMut(&str) -> Result<()>,

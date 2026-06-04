@@ -1,6 +1,9 @@
-target
 .git
 .idea
 .vscode
 .DS_Store
 *.log
+target/**
+!target/release
+!target/x86_64-unknown-linux-gnu/release/**
+!target/aarch64-unknown-linux-gnu/release/**

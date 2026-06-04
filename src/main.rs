@@ -3,6 +3,7 @@ mod api;
 mod auth;
 mod config;
 mod repl;
+mod terminal;
 
 use anyhow::{bail, Context, Result};
 use api::{ClientConfig, CodeusClient, Message};
@@ -41,6 +42,12 @@ struct GlobalOptions {
     api_base: Option<String>,
     model: Option<String>,
     token: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum AuthMode {
+    Passive,
+    Required,
 }
 
 #[derive(Debug, Subcommand)]
@@ -117,29 +124,29 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Some(Command::Chat(args)) => {
-            let client = client_from(&globals, &stored, args.model).await?;
+            let client = client_from(&globals, &stored, args.model, AuthMode::Passive).await?;
             repl::run(client).await
         }
         Some(Command::Run(args)) => {
-            let client = client_from(&globals, &stored, args.model).await?;
+            let client = client_from(&globals, &stored, args.model, AuthMode::Required).await?;
             run_prompt(client, args.prompt, args.cwd).await
         }
         Some(Command::Login(args)) => login(args).await,
         Some(Command::Logout) => logout(),
         Some(Command::Account) => {
-            let client = client_from(&globals, &stored, None).await?;
+            let client = client_from(&globals, &stored, None, AuthMode::Required).await?;
             account::print_account(&client).await
         }
         Some(Command::Usage) => {
-            let client = client_from(&globals, &stored, None).await?;
+            let client = client_from(&globals, &stored, None, AuthMode::Required).await?;
             account::print_usage(&client).await
         }
         Some(Command::Config { command }) => config_command(command, stored),
         None if !cli.prompt.is_empty() => {
-            let client = client_from(&globals, &stored, None).await?;
+            let client = client_from(&globals, &stored, None, AuthMode::Required).await?;
             run_prompt(client, cli.prompt, None).await
         }
-        None => repl::run(client_from(&globals, &stored, None).await?).await,
+        None => repl::run(client_from(&globals, &stored, None, AuthMode::Passive).await?).await,
     }
 }
 
@@ -195,6 +202,7 @@ async fn client_from(
     globals: &GlobalOptions,
     stored: &Config,
     command_model: Option<String>,
+    auth_mode: AuthMode,
 ) -> Result<CodeusClient> {
     let mut stored = stored.clone();
     let token = if let Some(token) = globals
@@ -210,44 +218,34 @@ async fn client_from(
         .filter(|_| !auth::token_is_expired(&stored))
     {
         Some(token)
-    } else if let Some(refresh_token) = stored
-        .refresh_token
-        .clone()
-        .filter(|token| !token.trim().is_empty())
-    {
-        match auth::refresh_session(
-            globals.api_base.clone(),
-            globals.model.clone(),
-            &mut stored,
-            &refresh_token,
-        )
-        .await
+    } else if matches!(auth_mode, AuthMode::Required) {
+        if let Some(refresh_token) = stored
+            .refresh_token
+            .clone()
+            .filter(|token| !token.trim().is_empty())
         {
-            Ok(token) => Some(token),
-            Err(error) => {
-                println!("Could not refresh your Codeus session: {error}");
-                println!("Starting browser login.");
-                stored = auth::login_with_browser(
+            Some(
+                auth::refresh_session(
                     globals.api_base.clone(),
                     globals.model.clone(),
-                    &stored,
-                    false,
+                    &mut stored,
+                    &refresh_token,
                 )
-                .await?;
-                stored.session_token.clone()
-            }
+                .await
+                .context("could not refresh your Codeus session")?,
+            )
+        } else {
+            None
         }
     } else {
-        println!("No Codeus account is connected yet. Starting browser login.");
-        stored = auth::login_with_browser(
-            globals.api_base.clone(),
-            globals.model.clone(),
-            &stored,
-            false,
-        )
-        .await?;
-        stored.session_token.clone()
+        None
     };
+
+    if matches!(auth_mode, AuthMode::Required) && token.is_none() {
+        bail!(
+            "No Codeus account is connected. Run `codeus` to open the terminal interface, then use `/login`, or run `codeus login --token ...` for development."
+        );
+    }
 
     let config = ClientConfig {
         api_base: globals
@@ -276,7 +274,9 @@ async fn login(args: LoginArgs) -> Result<()> {
         token: None,
     };
     let stored = Config::load()?;
-    auth::login_with_browser(globals.api_base, globals.model, &stored, args.no_browser).await?;
+    auth::login_with_browser(globals.api_base, globals.model, &stored, args.no_browser)
+        .await
+        .context("browser login could not start. The hosted proxy may not have device login deployed yet; for development, use `codeus login --token ...` or set CODEUS_SESSION_TOKEN")?;
     println!(
         "Connected Codeus CLI to your QC account at {}",
         config::config_path()?.display()

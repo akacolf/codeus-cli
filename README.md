@@ -26,13 +26,32 @@ codeus config show
 codeus config set model sonnet-4.6
 ```
 
-Running `codeus` with no arguments starts the interactive CLI. If no QC account is connected yet, the CLI starts the browser login flow automatically.
+Running `codeus` with no arguments starts the interactive CLI. First launch shows the Codeus terminal surface immediately; authentication starts only when the user runs `/login`, `codeus login`, or a command that requires an account.
 
 The default API base is:
 
 ```text
 https://api.quantumclub.sh/v1
 ```
+
+## Interactive chat
+
+`codeus` and `codeus chat` open the terminal chat surface with the Codeus logo, streamed replies, and slash commands:
+
+```text
+/help, /commands       Show the command list
+/status                Show model, API base, cwd, and thread size
+/login [--no-browser]  Connect a QC account
+/logout                Remove the stored session
+/cwd [path], /cd [path] Show or change the session working directory
+/model                 Show the active model
+/api                   Show the active API base
+/clear, /reset         Clear this thread
+/logo                  Print the Codeus logo
+/exit, /quit           Leave chat
+```
+
+Plain text is sent as a chat message after a QC account is connected. Changing `/cwd` also resets the thread so the model gets fresh workspace context.
 
 ## Configuration
 
@@ -64,11 +83,9 @@ cargo run -- chat
 cargo build --release
 ```
 
-Bun is useful for TypeScript projects, but it is not needed here unless the project later adds a separate web UI or packaging tool that justifies a JavaScript runtime.
-
 ## Vercel API proxy
 
-The repo also includes Vercel Functions for the hosted `/v1` API surface the CLI expects:
+The repo also includes a Rust Vercel Function for the hosted `/v1` API surface the CLI expects:
 
 ```text
 /v1/auth/device/code
@@ -79,6 +96,8 @@ The repo also includes Vercel Functions for the hosted `/v1` API surface the CLI
 /v1/usage
 ```
 
+The Vercel entrypoint is `api/index.rs`, declared as its own `[[bin]]` in `Cargo.toml` per Vercel's Rust runtime requirements. `vercel.json` rewrites `/v1/*` into that Rust function, where Axum routes the individual API paths.
+
 Deploy this repo to Vercel, set the server-side environment variables, then point the CLI at the deployment:
 
 ```bash
@@ -86,6 +105,12 @@ vercel pull --yes --environment preview
 vercel deploy
 codeus config set api_base https://your-codeus-api.vercel.app/v1
 codeus login
+```
+
+For local prebuilt Vercel builds, the Rust runtime invokes `cargo zigbuild` for the Linux serverless target. Install `rustup`, `zig`, and `cargo-zigbuild` before running:
+
+```bash
+vercel build --prod --yes
 ```
 
 Required Vercel environment variables:

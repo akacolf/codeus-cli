@@ -1,7 +1,0 @@
-{
-  "name": "codeus-cli-vercel-api",
-  "private": true,
-  "scripts": {
-    "vercel-build": "echo \"Vercel functions only\""
-  }
-}
