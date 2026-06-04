@@ -1,0 +1,36 @@
+{
+  "version": "0.1.0",
+  "url": "https://github.com/quantumclub/codeus-cli/releases/tag/v0.1.0",
+  "notes_url": "https://github.com/quantumclub/codeus-cli/releases/tag/v0.1.0",
+  "install": {
+    "curl": "Update with: curl -fsSL https://install.quantumclub.sh/codeus.sh | sh",
+    "homebrew": "Update with: brew update && brew upgrade quantumclub/tap/codeus",
+    "npm": "Update with: npm install -g @quantumclub/codeus@latest"
+  },
+  "targets": {
+    "aarch64-apple-darwin": {
+      "asset": "codeus-aarch64-apple-darwin.tar.gz",
+      "sha256": "<filled by release automation>"
+    },
+    "x86_64-apple-darwin": {
+      "asset": "codeus-x86_64-apple-darwin.tar.gz",
+      "sha256": "<filled by release automation>"
+    },
+    "aarch64-unknown-linux-musl": {
+      "asset": "codeus-aarch64-unknown-linux-musl.tar.gz",
+      "sha256": "<filled by release automation>"
+    },
+    "x86_64-unknown-linux-musl": {
+      "asset": "codeus-x86_64-unknown-linux-musl.tar.gz",
+      "sha256": "<filled by release automation>"
+    },
+    "aarch64-pc-windows-msvc": {
+      "asset": "codeus-aarch64-pc-windows-msvc.zip",
+      "sha256": "<filled by release automation>"
+    },
+    "x86_64-pc-windows-msvc": {
+      "asset": "codeus-x86_64-pc-windows-msvc.zip",
+      "sha256": "<filled by release automation>"
+    }
+  }
+}

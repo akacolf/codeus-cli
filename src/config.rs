@@ -17,6 +17,8 @@ pub struct Config {
     pub font: Option<String>,
     pub approved_command_prefixes: Option<Vec<Vec<String>>>,
     pub onboarded: Option<bool>,
+    pub update_check_disabled: Option<bool>,
+    pub last_update_check_at: Option<u64>,
 }
 
 impl Config {

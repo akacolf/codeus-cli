@@ -6,6 +6,9 @@ use std::env;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const BODY_LIMIT: usize = 4 * 1024 * 1024;
+const DEVICE_CODE_PATHS: &[&str] = &["device/link/init", "oauth/device/code", "device/code"];
+const DEVICE_TOKEN_PATHS: &[&str] = &["device/link/poll", "oauth/token", "device/token"];
+const REFRESH_PATHS: &[&str] = &["oauth/token", "refresh"];
 
 #[derive(Debug)]
 struct ProxyError {
@@ -22,6 +25,12 @@ impl ProxyError {
             message: message.into(),
         }
     }
+}
+
+struct UpstreamText {
+    status: reqwest::StatusCode,
+    headers: reqwest::header::HeaderMap,
+    text: String,
 }
 
 pub async fn chat_completions(request: Request) -> Response<Body> {
@@ -90,7 +99,11 @@ async fn chat_completions_inner(request: Request) -> Result<Response<Body>, Prox
 }
 
 async fn device_code_inner(request: Request) -> Result<Response<Body>, ProxyError> {
-    let auth_url = configured_url("CODEUS_DEVICE_CODE_URL", "CODEUS_AUTH_BASE", "device/code")?;
+    let auth_urls = configured_url_candidates(
+        "CODEUS_DEVICE_CODE_URL",
+        "CODEUS_AUTH_BASE",
+        DEVICE_CODE_PATHS,
+    )?;
     let mut payload = object_body(read_json(request).await?);
     payload.insert(
         "client_id".to_string(),
@@ -105,17 +118,10 @@ async fn device_code_inner(request: Request) -> Result<Response<Body>, ProxyErro
         ),
     );
 
-    let response = reqwest::Client::new()
-        .post(auth_url)
-        .header(header::CONTENT_TYPE.as_str(), "application/json")
-        .json(&payload)
-        .send()
-        .await
-        .map_err(upstream_request_error)?;
-
-    let status = response.status();
-    let headers = response.headers().clone();
-    let text = response.text().await.map_err(upstream_request_error)?;
+    let response = post_json_with_404_fallback(auth_urls, Value::Object(payload)).await?;
+    let status = response.status;
+    let headers = response.headers;
+    let text = response.text;
     if !status.is_success() {
         return Ok(text_response(status_code(status), headers, text));
     }
@@ -139,10 +145,10 @@ async fn device_code_inner(request: Request) -> Result<Response<Body>, ProxyErro
 }
 
 async fn device_token_inner(request: Request) -> Result<Response<Body>, ProxyError> {
-    let auth_url = configured_url(
+    let auth_urls = configured_url_candidates(
         "CODEUS_DEVICE_TOKEN_URL",
         "CODEUS_AUTH_BASE",
-        "device/token",
+        DEVICE_TOKEN_PATHS,
     )?;
     let mut payload = object_body(read_json(request).await?);
     payload.insert(
@@ -159,17 +165,10 @@ async fn device_token_inner(request: Request) -> Result<Response<Body>, ProxyErr
         payload.insert("deviceCode".to_string(), device_code);
     }
 
-    let response = reqwest::Client::new()
-        .post(auth_url)
-        .header(header::CONTENT_TYPE.as_str(), "application/json")
-        .json(&payload)
-        .send()
-        .await
-        .map_err(upstream_request_error)?;
-
-    let status = response.status();
-    let headers = response.headers().clone();
-    let text = response.text().await.map_err(upstream_request_error)?;
+    let response = post_json_with_404_fallback(auth_urls, Value::Object(payload)).await?;
+    let status = response.status;
+    let headers = response.headers;
+    let text = response.text;
     let upstream = if text.trim().is_empty() {
         json!({})
     } else {
@@ -207,7 +206,8 @@ async fn device_token_inner(request: Request) -> Result<Response<Body>, ProxyErr
 }
 
 async fn refresh_inner(request: Request) -> Result<Response<Body>, ProxyError> {
-    let auth_url = configured_url("CODEUS_REFRESH_URL", "CODEUS_AUTH_BASE", "refresh")?;
+    let auth_urls =
+        configured_url_candidates("CODEUS_REFRESH_URL", "CODEUS_AUTH_BASE", REFRESH_PATHS)?;
     let mut payload = object_body(read_json(request).await?);
     payload.insert(
         "client_id".to_string(),
@@ -216,7 +216,7 @@ async fn refresh_inner(request: Request) -> Result<Response<Body>, ProxyError> {
         ),
     );
 
-    proxy_json_post(auth_url, Value::Object(payload)).await
+    proxy_json_post_candidates(auth_urls, Value::Object(payload)).await
 }
 
 async fn account_inner(request: Request) -> Result<Response<Body>, ProxyError> {
@@ -245,16 +245,51 @@ async fn usage_inner(request: Request) -> Result<Response<Body>, ProxyError> {
     proxy_get(usage_url, token).await
 }
 
-async fn proxy_json_post(url: String, body: Value) -> Result<Response<Body>, ProxyError> {
-    let response = reqwest::Client::new()
-        .post(url)
-        .header(header::CONTENT_TYPE.as_str(), "application/json")
-        .json(&body)
-        .send()
-        .await
-        .map_err(upstream_request_error)?;
+async fn proxy_json_post_candidates(
+    urls: Vec<String>,
+    body: Value,
+) -> Result<Response<Body>, ProxyError> {
+    let response = post_json_with_404_fallback(urls, body).await?;
+    Ok(text_response(
+        status_code(response.status),
+        response.headers,
+        response.text,
+    ))
+}
 
-    Ok(proxy_response(response))
+async fn post_json_with_404_fallback(
+    urls: Vec<String>,
+    body: Value,
+) -> Result<UpstreamText, ProxyError> {
+    let client = reqwest::Client::new();
+    let last_index = urls.len().saturating_sub(1);
+
+    for (index, url) in urls.into_iter().enumerate() {
+        let response = client
+            .post(url)
+            .header(header::CONTENT_TYPE.as_str(), "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(upstream_request_error)?;
+
+        let status = response.status();
+        let headers = response.headers().clone();
+        let text = response.text().await.map_err(upstream_request_error)?;
+        if status != reqwest::StatusCode::NOT_FOUND || index == last_index {
+            return Ok(UpstreamText {
+                status,
+                headers,
+                text,
+            });
+        }
+    }
+
+    Err(ProxyError::new(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "missing_server_config",
+        "No upstream URLs were configured.",
+    ))
 }
 
 async fn proxy_get(url: String, token: String) -> Result<Response<Body>, ProxyError> {
@@ -357,6 +392,19 @@ fn configured_url(
 
     let base = require_env(base_name)?;
     Ok(upstream_url(&base, path))
+}
+
+fn configured_url_candidates(
+    override_name: &str,
+    base_name: &'static str,
+    paths: &[&str],
+) -> Result<Vec<String>, ProxyError> {
+    if let Some(url) = optional_env(override_name) {
+        return Ok(vec![url]);
+    }
+
+    let base = require_env(base_name)?;
+    Ok(paths.iter().map(|path| upstream_url(&base, path)).collect())
 }
 
 fn configured_account_url(override_name: &str, path: &str) -> Result<String, ProxyError> {

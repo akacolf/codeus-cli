@@ -12,7 +12,7 @@ use crate::tools::{self, ToolObservation, ToolStatus};
 use anyhow::{Context, Result};
 use std::io::{self, Write};
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 const MAX_MODEL_TOOL_STEPS: usize = 4;
 
@@ -508,24 +508,48 @@ fn print_welcome(terminal: &Terminal, client: &CodeusClient, session: &Session) 
         .unwrap_or("Auto");
     let font = font_label(stored.font.as_deref());
     let cwd = compact_path(session.cwd());
-    let title = format!("> Codeus CLI ({})", env!("CARGO_PKG_VERSION"));
 
-    println!("+------------------------------------------------------------+");
-    println!("{}", panel_line(&title));
+    let mut left = Vec::from([
+        String::new(),
+        "Welcome back to Codeus.".to_string(),
+        String::new(),
+    ]);
+    left.extend([
+        "   ____          __                ".to_string(),
+        "  / ___|___   __| | ___ _   _ ___ ".to_string(),
+        " | |   / _ \\ / _` |/ _ \\ | | / __|".to_string(),
+        " | |__| (_) | (_| |  __/ |_| \\__ \\".to_string(),
+        "  \\____\\___/ \\__,_|\\___|\\__,_|___/".to_string(),
+    ]);
+    left.extend([
+        String::new(),
+        format!("{} - {}", client.config().model, auth_label(client)),
+        cwd,
+        format!("{theme} - {font}"),
+    ]);
+
+    let mut right = Vec::new();
+    right.push("Recent activity".to_string());
+    right.extend(recent_activity_lines(session.thread_id()));
+    right.push(String::new());
+    right.push("What's new".to_string());
+    right.push("/login connects a QC account".to_string());
+    right.push("Native tools can read, search, and inspect git".to_string());
+    right.push("/resume continues local saved threads".to_string());
+
     println!(
         "{}",
-        panel_line(&format!(
-            "model: {}  auth: {}",
-            client.config().model,
-            auth_label(client)
+        terminal.accent(&format!(
+            "Codeus CLI v{} {}",
+            env!("CARGO_PKG_VERSION"),
+            "-".repeat(58)
         ))
     );
-    println!("{}", panel_line(&format!("directory: {cwd}")));
-    println!("{}", panel_line(&format!("theme: {theme}  font: {font}")));
-    println!("+------------------------------------------------------------+");
+    print_split_panel(terminal, &left, &right);
+    println!();
     println!(
         "{}",
-        terminal.muted("Type / to open commands. /login connects your QC account.")
+        terminal.muted("> Try \"explain this repo\" or type /help")
     );
     println!();
 }
@@ -669,7 +693,7 @@ async fn login_from_repl(
             println!(
                 "{}",
                 terminal.muted(
-                    "If the hosted proxy does not expose device login yet, use `codeus login --token ...` or set CODEUS_SESSION_TOKEN for development."
+                    "Verify CODEUS_API_BASE points at https://api.quantumclub.sh/v1, or use `codeus login --token ...` for development/support."
                 )
             );
         }
@@ -690,12 +714,100 @@ fn prompt(terminal: &Terminal, _session: &Session) -> (String, usize) {
     (format!("{} ", terminal.accent(">")), 2)
 }
 
-fn panel_line(value: &str) -> String {
-    const WIDTH: usize = 58;
-    let mut visible: String = value.chars().take(WIDTH).collect();
-    let padding = WIDTH.saturating_sub(visible.chars().count());
+fn print_split_panel(terminal: &Terminal, left: &[String], right: &[String]) {
+    const LEFT_WIDTH: usize = 39;
+    const RIGHT_WIDTH: usize = 49;
+    let border = format!(
+        "+{}+{}+",
+        "-".repeat(LEFT_WIDTH + 2),
+        "-".repeat(RIGHT_WIDTH + 2)
+    );
+    println!("{}", terminal.accent(&border));
+
+    let rows = left.len().max(right.len());
+    for index in 0..rows {
+        let left_value = left.get(index).map(String::as_str).unwrap_or_default();
+        let right_value = right.get(index).map(String::as_str).unwrap_or_default();
+        let left_cell = pad_cell(left_value, LEFT_WIDTH);
+        let right_cell = pad_cell(right_value, RIGHT_WIDTH);
+
+        let left_cell = if left_value.contains("___") || left_value.contains("| |") {
+            terminal.accent(&left_cell)
+        } else {
+            left_cell
+        };
+        let right_cell = match right_value {
+            "Recent activity" | "What's new" => terminal.accent(&right_cell),
+            _ => right_cell,
+        };
+
+        println!(
+            "{} {} {} {} {}",
+            terminal.accent("|"),
+            left_cell,
+            terminal.accent("|"),
+            right_cell,
+            terminal.accent("|")
+        );
+    }
+
+    println!("{}", terminal.accent(&border));
+}
+
+fn pad_cell(value: &str, width: usize) -> String {
+    let mut visible: String = value.chars().take(width).collect();
+    let padding = width.saturating_sub(visible.chars().count());
     visible.push_str(&" ".repeat(padding));
-    format!("| {visible} |")
+    visible
+}
+
+fn recent_activity_lines(current_thread_id: &str) -> Vec<String> {
+    let Ok(threads) = thread_store::list_threads() else {
+        return vec!["No saved threads yet".to_string()];
+    };
+    let mut lines = threads
+        .into_iter()
+        .filter(|thread| thread.id != current_thread_id)
+        .take(4)
+        .map(|thread| {
+            format!(
+                "{:<8} Resume {}",
+                format_age(thread.updated_at),
+                short_thread_id(&thread.id)
+            )
+        })
+        .collect::<Vec<_>>();
+
+    if lines.is_empty() {
+        lines.push("No saved threads yet".to_string());
+    } else {
+        lines.push("... /resume for more".to_string());
+    }
+
+    lines
+}
+
+fn short_thread_id(id: &str) -> String {
+    id.chars().take(12).collect()
+}
+
+fn format_age(updated_at: u64) -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(updated_at);
+    let seconds = now.saturating_sub(updated_at);
+    if seconds < 60 {
+        "now".to_string()
+    } else if seconds < 60 * 60 {
+        format!("{}m ago", seconds / 60)
+    } else if seconds < 60 * 60 * 24 {
+        format!("{}h ago", seconds / 60 / 60)
+    } else if seconds < 60 * 60 * 24 * 7 {
+        format!("{}d ago", seconds / 60 / 60 / 24)
+    } else {
+        format!("{}w ago", seconds / 60 / 60 / 24 / 7)
+    }
 }
 
 fn compact_path(path: &PathBuf) -> String {

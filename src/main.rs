@@ -12,6 +12,7 @@ mod terminal;
 mod thread_store;
 mod tool_protocol;
 mod tools;
+mod update;
 
 use anyhow::{bail, Context, Result};
 use api::{ClientConfig, CodeusClient, Message};
@@ -72,6 +73,8 @@ enum Command {
     Account,
     /// Show remaining usage for the signed-in QC account.
     Usage,
+    /// Check for and install the latest Codeus CLI release.
+    Update,
     /// Inspect or update local CLI configuration.
     Config {
         #[command(subcommand)]
@@ -133,6 +136,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Some(Command::Chat(args)) => {
             let stored = maybe_onboard(&globals, stored, args.model.clone()).await?;
+            update::maybe_print_update_notice(&stored).await;
             let client = client_from(&globals, &stored, args.model, AuthMode::Passive).await?;
             repl::run(client).await
         }
@@ -150,6 +154,7 @@ async fn main() -> Result<()> {
             let client = client_from(&globals, &stored, None, AuthMode::Required).await?;
             account::print_usage(&client).await
         }
+        Some(Command::Update) => update::run_update().await,
         Some(Command::Config { command }) => config_command(command, stored),
         None if !cli.prompt.is_empty() => {
             let client = client_from(&globals, &stored, None, AuthMode::Required).await?;
@@ -157,6 +162,7 @@ async fn main() -> Result<()> {
         }
         None => {
             let stored = maybe_onboard(&globals, stored, None).await?;
+            update::maybe_print_update_notice(&stored).await;
             repl::run(client_from(&globals, &stored, None, AuthMode::Passive).await?).await
         }
     }
@@ -293,7 +299,7 @@ async fn login(args: LoginArgs) -> Result<()> {
     let stored = Config::load()?;
     auth::login_with_browser(globals.api_base, globals.model, &stored, args.no_browser)
         .await
-        .context("browser login could not start. The hosted proxy may not have device login deployed yet; for development, use `codeus login --token ...` or set CODEUS_SESSION_TOKEN")?;
+        .context("browser login could not start. Verify CODEUS_API_BASE points at https://api.quantumclub.sh/v1 or another host exposing the Codeus device-link API")?;
     println!(
         "Connected Codeus CLI to your QC account at {}",
         config::config_path()?.display()
@@ -343,6 +349,16 @@ fn config_command(command: ConfigCommand, mut config: Config) -> Result<()> {
                             .context("token_expires_at must be a Unix timestamp")?,
                     )
                 }
+                "update_check_disabled" => {
+                    config.update_check_disabled = Some(parse_bool(&value)?);
+                }
+                "last_update_check_at" => {
+                    config.last_update_check_at = Some(
+                        value
+                            .parse()
+                            .context("last_update_check_at must be a Unix timestamp")?,
+                    )
+                }
                 _ => bail!("unknown config key: {key}"),
             }
             config.save()?;
@@ -356,6 +372,8 @@ fn config_command(command: ConfigCommand, mut config: Config) -> Result<()> {
                 "refresh_token" => config.refresh_token = None,
                 "font" => config.font = None,
                 "token_expires_at" => config.token_expires_at = None,
+                "update_check_disabled" => config.update_check_disabled = None,
+                "last_update_check_at" => config.last_update_check_at = None,
                 _ => bail!("unknown config key: {key}"),
             }
             config.save()?;
@@ -363,4 +381,12 @@ fn config_command(command: ConfigCommand, mut config: Config) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn parse_bool(value: &str) -> Result<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => bail!("expected true or false"),
+    }
 }

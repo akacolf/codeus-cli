@@ -4,6 +4,12 @@ Terminal-native Codeus for working with QC's hosted agent service without the de
 
 This repository is intentionally small at first: it provides a Rust `codeus` binary, streams chat completions from the QC proxy, and connects to a user's QC account with a browser login. The desktop app can keep maturing independently while the CLI gives users a lower-friction way to try Codeus.
 
+## About
+
+Codeus CLI is a small Rust CLI for QC Codeus. It keeps provider credentials server-side, stores only local CLI preferences and a Codeus session token, and gives users a distribution-friendly fallback when desktop signing, notarization, or installer friction gets in the way.
+
+See [ABOUT.md](ABOUT.md) for the project scope and non-goals.
+
 ## Install
 
 Rust is required.
@@ -11,6 +17,16 @@ Rust is required.
 ```bash
 cargo install --path .
 ```
+
+Public distribution is prepared around signed release archives first, then curl, Homebrew, and npm wrappers over the same artifacts:
+
+```bash
+curl -fsSL https://install.quantumclub.sh/codeus.sh | sh
+brew install quantumclub/tap/codeus
+npm install -g @quantumclub/codeus
+```
+
+See [DISTRIBUTION.md](DISTRIBUTION.md) for the release checklist and update plan.
 
 ## Usage
 
@@ -22,6 +38,7 @@ codeus chat
 codeus login
 codeus account
 codeus usage
+codeus update
 codeus config show
 codeus config set model sonnet-4.6
 ```
@@ -134,9 +151,26 @@ Supported environment overrides:
 CODEUS_API_BASE=https://api.quantumclub.sh/v1
 CODEUS_MODEL=sonnet-4.6
 CODEUS_SESSION_TOKEN=...
+CODEUS_NO_UPDATE_CHECK=1
+CODEUS_UPDATE_ENDPOINT=https://github.com/quantumclub/codeus-cli/releases/latest/download/codeus-release.json
 ```
 
-The CLI sends `Authorization: Bearer <token>` after the QC browser login completes. `CODEUS_SESSION_TOKEN` and `codeus login --token ...` remain available for development and support, but users should not need to paste tokens for normal sessions.
+The CLI sends `Authorization: Bearer <token>` after the QC browser login completes. Browser login uses the website-backed device-link API:
+
+```text
+/device/link/init
+/device/link/poll
+```
+
+The same `CODEUS_API_BASE` is used for chat, account, and usage:
+
+```text
+/chat/completions
+/auth/whoami
+/balance
+```
+
+`CODEUS_SESSION_TOKEN` and `codeus login --token ...` remain available for development and support, but users should not need to paste tokens for normal sessions.
 
 Set `CODEUS_SESSION_TOKEN` only to a Codeus session token issued by QC's hosted proxy or support tooling. Do not set it to an upstream provider API key; provider credentials stay server-side.
 
@@ -149,6 +183,18 @@ onboarded = true
 ```
 
 The font preference records what the user wants Codeus to use in terminal-themed surfaces. Terminal emulators still control the actual rendered font, so users may need to select the matching font in their terminal profile.
+
+`codeus` checks for CLI updates at startup at most once per day. The default update metadata is the `codeus-release.json` asset attached to the latest GitHub Release. Disable checks with:
+
+```toml
+update_check_disabled = true
+```
+
+or:
+
+```bash
+CODEUS_NO_UPDATE_CHECK=1
+```
 
 ## Development
 
@@ -164,9 +210,13 @@ cargo build --release
 
 ## Vercel API proxy
 
-The repo also includes a Rust Vercel Function for the hosted `/v1` API surface the CLI expects:
+Production login and billing live in the Quantum Club website API (`/api/codeus/v1/*`), which is rewritten for `https://api.quantumclub.sh/v1`. The repo also includes a Rust Vercel Function for standalone proxy experiments, but the hosted website API is the preferred production deployment because Vercel does not provide a first-class Rust project preset.
+
+The optional Rust function can expose:
 
 ```text
+/v1/device/link/init
+/v1/device/link/poll
 /v1/auth/device/code
 /v1/auth/device/token
 /v1/auth/refresh
@@ -186,6 +236,8 @@ codeus config set api_base https://your-codeus-api.vercel.app/v1
 codeus login
 ```
 
+If deploying this repository as a standalone Vercel project with the `Other` preset, verify that `/v1/device/link/init` returns JSON. If Vercel serves a 404 before this function runs, use the website API host instead of the standalone Rust project.
+
 For local prebuilt Vercel builds, the Rust runtime invokes `cargo zigbuild` for the Linux serverless target. Install `rustup`, `zig`, and `cargo-zigbuild` before running:
 
 ```bash
@@ -198,6 +250,25 @@ Required Vercel environment variables:
 CODEUS_AUTH_BASE=https://your-qc-auth-service.example.com
 CODEUS_CHAT_BASE=https://your-openai-compatible-chat-service.example.com/v1
 ```
+
+For browser login, the proxy tries the website-style device-link paths first:
+
+```text
+CODEUS_AUTH_BASE/device/link/init
+CODEUS_AUTH_BASE/device/link/poll
+```
+
+It falls back to OAuth-style and older local defaults:
+
+```text
+CODEUS_AUTH_BASE/oauth/device/code
+CODEUS_AUTH_BASE/oauth/token
+CODEUS_AUTH_BASE/device/code
+CODEUS_AUTH_BASE/device/token
+CODEUS_AUTH_BASE/refresh
+```
+
+If the QC auth service uses different routes, set the exact `CODEUS_DEVICE_CODE_URL`, `CODEUS_DEVICE_TOKEN_URL`, and `CODEUS_REFRESH_URL` overrides below.
 
 Optional exact upstream URL overrides:
 
@@ -223,7 +294,8 @@ If `CODEUS_CHAT_API_KEY` is set, Vercel sends it to the chat upstream and forwar
 
 ## Roadmap
 
-- Local workspace tools with explicit approval
-- Project-aware chat history
-- Shell completions and Homebrew packaging
+- Signed release archives and checksum verification
+- Curl, Homebrew, and npm install channels
+- Startup update notices and `codeus update` for direct binary installs
+- Shell completions
 - Shared model/catalog metadata with the desktop app

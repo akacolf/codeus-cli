@@ -218,89 +218,93 @@ impl CodeusClient {
     }
 
     pub async fn begin_device_login(&self) -> Result<DeviceAuthorization> {
-        let url = format!(
-            "{}/auth/device/code",
-            self.config.api_base.trim_end_matches('/')
-        );
+        let body = json!({
+            "client_id": "codeus-cli",
+            "client_name": "Codeus CLI",
+            "scope": "chat account usage",
+            "accountId": null,
+        });
 
-        let response = self
-            .http
-            .post(url)
-            .json(&json!({
-                "client_id": "codeus-cli",
-                "client_name": "Codeus CLI",
-                "scope": "chat account usage",
-            }))
-            .send()
-            .await
-            .context("failed to start browser login")?;
+        let mut last_404 = String::new();
+        for path in ["device/link/init", "auth/device/code"] {
+            let url = self.url(path);
+            let response = self
+                .http
+                .post(url)
+                .json(&body)
+                .send()
+                .await
+                .context("failed to start browser login")?;
 
-        let status = response.status();
-        let text = response.text().await.unwrap_or_default();
-        if !status.is_success() {
-            return Err(anyhow!(
-                "browser login is not available from the proxy ({status}): {}",
-                text.trim()
-            ));
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            if status == StatusCode::NOT_FOUND {
+                last_404 = text.trim().to_string();
+                continue;
+            }
+            if !status.is_success() {
+                return Err(anyhow!(
+                    "browser login is not available from the proxy ({status}): {}",
+                    text.trim()
+                ));
+            }
+
+            let value: Value =
+                serde_json::from_str(&text).context("failed to parse browser login response")?;
+            return parse_device_authorization(value);
         }
 
-        let value: Value =
-            serde_json::from_str(&text).context("failed to parse browser login response")?;
-        parse_device_authorization(value)
+        Err(anyhow!(
+            "browser login route returned 404. The QC website exposes /device/link/init and /device/link/poll through /v1 rewrites; verify the CLI is pointed at https://api.quantumclub.sh/v1 or deploy those routes on the configured API host: {last_404}"
+        ))
     }
 
     pub async fn poll_device_token(&self, device_code: &str) -> Result<DeviceTokenStatus> {
-        let url = format!(
-            "{}/auth/device/token",
-            self.config.api_base.trim_end_matches('/')
-        );
+        let body = json!({
+            "client_id": "codeus-cli",
+            "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+            "deviceCode": device_code,
+            "device_code": device_code,
+        });
 
-        let response = self
-            .http
-            .post(url)
-            .json(&json!({
-                "client_id": "codeus-cli",
-                "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
-                "device_code": device_code,
-            }))
-            .send()
-            .await
-            .context("failed to poll browser login")?;
+        let mut last_not_found = String::new();
+        for path in ["device/link/poll", "auth/device/token"] {
+            let response = self
+                .http
+                .post(self.url(path))
+                .json(&body)
+                .send()
+                .await
+                .context("failed to poll browser login")?;
 
-        let status = response.status();
-        let text = response.text().await.unwrap_or_default();
-        let value: Value = serde_json::from_str(&text).unwrap_or_else(|_| json!({}));
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            let value: Value = serde_json::from_str(&text).unwrap_or_else(|_| json!({}));
 
-        if status.is_success() {
-            return Ok(DeviceTokenStatus::Authorized(parse_token_set(value)?));
+            if status.is_success() {
+                return Ok(DeviceTokenStatus::Authorized(parse_token_set(value)?));
+            }
+
+            if status == StatusCode::ACCEPTED {
+                return Ok(DeviceTokenStatus::Pending);
+            }
+            if status == StatusCode::GONE {
+                return match value.get("status").and_then(Value::as_str) {
+                    Some("denied") => Ok(DeviceTokenStatus::Denied(
+                        "browser login was denied".to_string(),
+                    )),
+                    _ => Ok(DeviceTokenStatus::Expired),
+                };
+            }
+            if status == StatusCode::NOT_FOUND {
+                last_not_found = text.trim().to_string();
+                continue;
+            }
+
+            return parse_device_token_error(status, &text, value);
         }
 
-        let error = value
-            .get("error")
-            .or_else(|| value.get("code"))
-            .and_then(Value::as_str)
-            .unwrap_or("unknown_error");
-        let description = value
-            .get("error_description")
-            .or_else(|| value.get("message"))
-            .and_then(Value::as_str)
-            .unwrap_or(error)
-            .to_string();
-
-        match error {
-            "authorization_pending" | "pending" => Ok(DeviceTokenStatus::Pending),
-            "slow_down" => Ok(DeviceTokenStatus::SlowDown),
-            "access_denied" | "denied" => Ok(DeviceTokenStatus::Denied(description)),
-            "expired_token" | "expired" => Ok(DeviceTokenStatus::Expired),
-            _ => Err(anyhow!(
-                "browser login failed ({status}): {}",
-                if text.trim().is_empty() {
-                    description
-                } else {
-                    text.trim().to_string()
-                }
-            )),
-        }
+        Err(anyhow!("browser login failed (404): {last_not_found}"))
     }
 
     pub async fn refresh_session(&self, refresh_token: &str) -> Result<TokenSet> {
@@ -335,13 +339,21 @@ impl CodeusClient {
     }
 
     pub async fn account(&self) -> Result<Value> {
-        self.get_json_from_candidates(&["account", "me", "auth/session"])
+        self.get_json_from_candidates(&["auth/whoami", "account", "me", "auth/session"])
             .await
     }
 
     pub async fn usage(&self) -> Result<Value> {
-        self.get_json_from_candidates(&["usage", "account/usage"])
+        self.get_json_from_candidates(&["balance", "usage", "account/usage"])
             .await
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!(
+            "{}/{}",
+            self.config.api_base.trim_end_matches('/'),
+            path.trim_start_matches('/')
+        )
     }
 
     async fn get_json_from_candidates(&self, paths: &[&str]) -> Result<Value> {
@@ -357,13 +369,12 @@ impl CodeusClient {
     }
 
     async fn get_json(&self, path: &str) -> Result<Value> {
-        let url = format!(
-            "{}/{}",
-            self.config.api_base.trim_end_matches('/'),
-            path.trim_start_matches('/')
-        );
-
-        let response = self.http.get(url).send().await.context("request failed")?;
+        let response = self
+            .http
+            .get(self.url(path))
+            .send()
+            .await
+            .context("request failed")?;
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
         if !status.is_success() {
@@ -381,6 +392,40 @@ impl CodeusClient {
     }
 }
 
+fn parse_device_token_error(
+    status: StatusCode,
+    text: &str,
+    value: Value,
+) -> Result<DeviceTokenStatus> {
+    let error = value
+        .get("error")
+        .or_else(|| value.get("code"))
+        .or_else(|| value.get("status"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown_error");
+    let description = value
+        .get("error_description")
+        .or_else(|| value.get("message"))
+        .and_then(Value::as_str)
+        .unwrap_or(error)
+        .to_string();
+
+    match error {
+        "authorization_pending" | "pending" => Ok(DeviceTokenStatus::Pending),
+        "slow_down" => Ok(DeviceTokenStatus::SlowDown),
+        "access_denied" | "denied" => Ok(DeviceTokenStatus::Denied(description)),
+        "expired_token" | "expired" => Ok(DeviceTokenStatus::Expired),
+        _ => Err(anyhow!(
+            "browser login failed ({status}): {}",
+            if text.trim().is_empty() {
+                description
+            } else {
+                text.trim().to_string()
+            }
+        )),
+    }
+}
+
 fn parse_device_authorization(value: Value) -> Result<DeviceAuthorization> {
     let device_code = string_field(&value, &["device_code", "deviceCode"])
         .context("browser login response did not include a device code")?;
@@ -390,6 +435,7 @@ fn parse_device_authorization(value: Value) -> Result<DeviceAuthorization> {
             "verification_uri",
             "verification_url",
             "verificationUrl",
+            "linkUrl",
             "url",
         ],
     )
@@ -406,9 +452,10 @@ fn parse_device_authorization(value: Value) -> Result<DeviceAuthorization> {
                 "verification_url_complete",
                 "verificationUrlComplete",
                 "complete_url",
+                "linkUrl",
             ],
         ),
-        expires_in: u64_field(&value, &["expires_in", "expiresIn"]).unwrap_or(600),
+        expires_in: expires_in_field(&value).unwrap_or(600),
         interval: u64_field(&value, &["interval"]).unwrap_or(5).max(1),
         message: string_field(&value, &["message"]),
     })
@@ -424,7 +471,7 @@ fn parse_token_set(value: Value) -> Result<TokenSet> {
     Ok(TokenSet {
         session_token,
         refresh_token: string_field(&value, &["refresh_token", "refreshToken"]),
-        expires_in: u64_field(&value, &["expires_in", "expiresIn"]),
+        expires_in: expires_in_field(&value),
     })
 }
 
@@ -441,6 +488,29 @@ fn u64_field(value: &Value, keys: &[&str]) -> Option<u64> {
     keys.iter()
         .filter_map(|key| value.get(*key))
         .find_map(|value| value.as_u64().or_else(|| value.as_str()?.parse().ok()))
+}
+
+fn expires_in_field(value: &Value) -> Option<u64> {
+    if let Some(expires_in) = u64_field(value, &["expires_in", "expiresIn"]) {
+        return Some(expires_in);
+    }
+
+    let expires_at = u64_field(value, &["expires_at", "expiresAt"])?;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_millis() as u64;
+    if expires_at > 10_000_000_000 {
+        return Some(
+            expires_at
+                .saturating_sub(now_ms)
+                .saturating_div(1000)
+                .max(1),
+        );
+    }
+
+    let now_secs = now_ms / 1000;
+    Some(expires_at.saturating_sub(now_secs).max(1))
 }
 
 fn find_sse_boundary(buffer: &str) -> Option<(usize, usize)> {
@@ -667,6 +737,28 @@ mod tests {
     }
 
     #[test]
+    fn parses_website_device_link_response() {
+        let auth = parse_device_authorization(json!({
+            "deviceCode": "device-123",
+            "userCode": "ABCD2345",
+            "linkUrl": "https://quantumclub.sh/account/link?code=ABCD2345",
+            "pollUrl": "https://quantumclub.sh/api/codeus/v1/device/link/poll",
+            "expiresAt": 4_102_444_800_000_u64,
+            "interval": 2
+        }))
+        .expect("website device link response should parse");
+
+        assert_eq!(auth.device_code, "device-123");
+        assert_eq!(auth.user_code.as_deref(), Some("ABCD2345"));
+        assert_eq!(
+            auth.verification_uri,
+            "https://quantumclub.sh/account/link?code=ABCD2345"
+        );
+        assert_eq!(auth.interval, 2);
+        assert!(auth.expires_in > 0);
+    }
+
+    #[test]
     fn parses_token_set_aliases() {
         let token = parse_token_set(json!({
             "access_token": "session-123",
@@ -678,6 +770,19 @@ mod tests {
         assert_eq!(token.session_token, "session-123");
         assert_eq!(token.refresh_token.as_deref(), Some("refresh-123"));
         assert_eq!(token.expires_in, Some(3600));
+    }
+
+    #[test]
+    fn parses_website_session_token_response() {
+        let token = parse_token_set(json!({
+            "status": "approved",
+            "sessionToken": "session-123",
+            "expiresAt": 4_102_444_800_000_u64
+        }))
+        .expect("website session response should parse");
+
+        assert_eq!(token.session_token, "session-123");
+        assert!(token.expires_in.is_some());
     }
 
     #[test]

@@ -1,0 +1,24 @@
+{
+  "name": "@quantumclub/codeus",
+  "version": "0.0.0-dev",
+  "description": "Terminal-native companion to QC Codeus",
+  "license": "UNLICENSED",
+  "bin": {
+    "codeus": "bin/codeus.js"
+  },
+  "scripts": {
+    "postinstall": "node install.js"
+  },
+  "files": [
+    "bin/codeus.js",
+    "install.js"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/quantumclub/codeus-cli.git",
+    "directory": "dist/npm"
+  },
+  "engines": {
+    "node": ">=16"
+  }
+}
