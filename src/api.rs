@@ -653,6 +653,20 @@ fn local_tool_schemas() -> Value {
         {
             "type": "function",
             "function": {
+                "name": "list_files",
+                "description": "List files under the active workspace, skipping common generated directories.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string" }
+                    },
+                    "additionalProperties": false
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "read_file",
                 "description": "Read a UTF-8-ish text file under the active workspace.",
                 "parameters": {
@@ -677,6 +691,52 @@ fn local_tool_schemas() -> Value {
                         "path": { "type": "string" }
                     },
                     "required": ["pattern"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "replace_in_file",
+                "description": "Replace one exact text snippet in a workspace file. The old_text must occur exactly once.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string" },
+                        "old_text": { "type": "string" },
+                        "new_text": { "type": "string" }
+                    },
+                    "required": ["path", "old_text", "new_text"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "apply_patch",
+                "description": "Apply a structured workspace patch. Validate all operations before writing. Operations are add, delete, or replace.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "operations": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "op": { "type": "string", "enum": ["add", "delete", "replace"] },
+                                    "path": { "type": "string" },
+                                    "content": { "type": "string" },
+                                    "old_text": { "type": "string" },
+                                    "new_text": { "type": "string" }
+                                },
+                                "required": ["op", "path"],
+                                "additionalProperties": false
+                            }
+                        }
+                    },
+                    "required": ["operations"],
                     "additionalProperties": false
                 }
             }

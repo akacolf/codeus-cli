@@ -1,5 +1,5 @@
 use crate::api::ChatToolCall;
-use crate::config::Config;
+use crate::config::{self, Config, PermissionMode};
 use crate::tools::{self, ToolObservation, ToolStatus};
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -35,6 +35,7 @@ pub async fn execute_tool_call(
     call: &ModelToolCall,
 ) -> Result<ToolObservation> {
     match call.name.as_str() {
+        "list_files" => tools::list_files(cwd, string_arg(&call.args, "path")),
         "read_file" => {
             let Some(path) = string_arg(&call.args, "path") else {
                 return Ok(denied(&call.name, &call.args, "missing string arg `path`"));
@@ -47,6 +48,52 @@ pub async fn execute_tool_call(
             };
             tools::search_text(cwd, pattern, string_arg(&call.args, "path"))
         }
+        "replace_in_file" => {
+            if config::effective_permission_mode(config) == PermissionMode::ReadOnly {
+                return Ok(denied(
+                    &call.name,
+                    &call.args,
+                    "File edits are denied in read-only permission mode.",
+                ));
+            }
+            let Some(path) = string_arg(&call.args, "path") else {
+                return Ok(denied(&call.name, &call.args, "missing string arg `path`"));
+            };
+            let Some(old_text) = string_arg(&call.args, "old_text") else {
+                return Ok(denied(
+                    &call.name,
+                    &call.args,
+                    "missing string arg `old_text`",
+                ));
+            };
+            let Some(new_text) = call.args.get("new_text").and_then(Value::as_str) else {
+                return Ok(denied(
+                    &call.name,
+                    &call.args,
+                    "missing string arg `new_text`",
+                ));
+            };
+            tools::replace_in_file(cwd, path, old_text, new_text)
+        }
+        "apply_patch" => {
+            if config::effective_permission_mode(config) == PermissionMode::ReadOnly {
+                return Ok(denied(
+                    &call.name,
+                    &call.args,
+                    "File edits are denied in read-only permission mode.",
+                ));
+            }
+            let Some(operations) = call.args.get("operations") else {
+                return Ok(denied(
+                    &call.name,
+                    &call.args,
+                    "missing array arg `operations`",
+                ));
+            };
+            let operations = serde_json::from_value(operations.clone())
+                .context("failed to parse apply_patch operations")?;
+            tools::apply_patch(cwd, operations)
+        }
         "git_status" => tools::git_status(cwd).await,
         "git_diff" => tools::git_diff(cwd).await,
         "run_command" => {
@@ -58,7 +105,7 @@ pub async fn execute_tool_call(
         _ => Ok(denied(
             &call.name,
             &call.args,
-            "unknown tool; allowed tools are read_file, search_text, git_status, git_diff, run_command",
+            "unknown tool; allowed tools are list_files, read_file, search_text, replace_in_file, apply_patch, git_status, git_diff, run_command",
         )),
     }
 }

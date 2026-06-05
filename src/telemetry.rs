@@ -32,7 +32,10 @@ pub fn record(event: &str, fields: Value) -> Result<()> {
     serde_json::to_writer(
         &mut file,
         &json!({
+            "schema_version": 1,
+            "source": "codeus-cli",
             "timestamp": now_secs(),
+            "timestamp_ms": now_millis(),
             "event": event,
             "fields": fields,
         }),
@@ -52,5 +55,12 @@ fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
+        .unwrap_or_default()
+}
+
+fn now_millis() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
         .unwrap_or_default()
 }

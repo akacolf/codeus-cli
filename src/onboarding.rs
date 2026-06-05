@@ -61,13 +61,13 @@ pub async fn run(
                         signed_in.font = config.font;
                     }
                     signed_in.save()?;
-                    println!("{}", terminal.success("Signed in. Codeus CLI is ready."));
+                    println!("{}", terminal.success("Signed in."));
                     Ok(signed_in)
                 }
                 Err(error) => {
                     println!(
                         "{} Browser login could not finish: {error}",
-                        terminal.warn("!")
+                        terminal.warn("•")
                     );
                     println!(
                         "{}",

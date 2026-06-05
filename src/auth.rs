@@ -115,7 +115,7 @@ fn print_device_instructions(auth: &DeviceAuthorization, no_browser: bool, theme
             ),
             Err(error) => println!(
                 "{} Could not open a browser automatically: {error}",
-                terminal.warn("!")
+                terminal.warn("•")
             ),
         }
     } else {

@@ -38,9 +38,15 @@ codeus chat
 codeus login
 codeus account
 codeus usage
+codeus doctor
+codeus status --output-format json
+codeus state
 codeus update
 codeus config show
+codeus config env
 codeus config set model sonnet-4.6
+codeus config set permission_mode read-only
+codeus config set sandbox_policy policy-only
 ```
 
 Running `codeus` with no arguments starts the interactive CLI. First launch shows the Codeus logo, lets users choose a named syntax-style terminal theme and coding font preference with arrow keys and a live preview, then signs in with a Quantum Club account through the hosted Codeus proxy. Users can skip sign-in and connect later with `/login` or `codeus login`.
@@ -61,6 +67,7 @@ https://api.quantumclub.sh/v1
 /threads               List saved local threads
 /resume [id|latest]    Resume a saved thread
 /compact               Compact older messages into summary context
+/files [path]          List workspace files
 /read <path>           Read a workspace file into the thread
 /search <pattern> [path] Search workspace text
 /git status|diff       Run safe git inspection commands
@@ -93,7 +100,7 @@ Use `/compact` to fold older messages into a local summary. Codeus also auto-com
 
 ## Local tools and approvals
 
-Codeus exposes typed local tools through slash commands. `/read` and `/search` are restricted to the active workspace, skip large generated directories during search, and truncate large outputs before saving them into the thread. `/git status` and `/git diff` are read-only inspection commands.
+Codeus exposes typed local tools through slash commands. `/files`, `/read`, and `/search` are restricted to the active workspace, skip large generated directories where recursive traversal is needed, and truncate large outputs before saving them into the thread. `/git status` and `/git diff` are read-only inspection commands.
 
 The model can also request local tools during a turn through native Chat Completions tool calls. Codeus sends the local tool schema with each chat request, executes returned tool calls with the same workspace and approval rules, records tool observations, then asks the model to continue. A hidden `codeus_tool_call` block remains as a fallback for upstreams that ignore native tool schemas. A turn is capped at four model-requested tool steps to avoid loops.
 
@@ -101,13 +108,28 @@ Supported model-requested tool names are:
 
 ```text
 read_file
+list_files
 search_text
+replace_in_file
+apply_patch
 git_status
 git_diff
 run_command
 ```
 
-`/run` does not invoke a shell. It parses the command into an argv vector and runs it only when it matches an approved prefix. Built-in prefixes are:
+`apply_patch` accepts structured operations and validates the full patch before writing:
+
+```json
+{
+  "operations": [
+    { "op": "add", "path": "notes.txt", "content": "hello\n" },
+    { "op": "replace", "path": "src/main.rs", "old_text": "old", "new_text": "new" },
+    { "op": "delete", "path": "tmp.txt" }
+  ]
+}
+```
+
+`/run` does not invoke a shell. It parses shell-style quoting into an argv vector and runs it only when the structured command policy matches an approved rule. Built-in prefixes are:
 
 ```text
 cargo check
@@ -128,6 +150,8 @@ approved_command_prefixes = [
 ```
 
 Use `/approvals` to see the effective prefix list.
+
+Command execution currently uses a `policy-only` sandbox policy: Codeus enforces argv policy, workspace permission mode, timeouts, and output limits, but it does not claim native macOS Seatbelt or Linux namespace isolation yet.
 
 Set `CODEUS_TRACE=1` to write local JSONL telemetry events to:
 
@@ -151,6 +175,7 @@ Supported environment overrides:
 CODEUS_API_BASE=https://api.quantumclub.sh/v1
 CODEUS_MODEL=sonnet-4.6
 CODEUS_SESSION_TOKEN=...
+CODEUS_SANDBOX_POLICY=policy-only
 CODEUS_NO_UPDATE_CHECK=1
 CODEUS_UPDATE_ENDPOINT=https://github.com/atomicfield/codeus-cli/releases/latest/download/codeus-release.json
 ```
@@ -196,6 +221,32 @@ or:
 CODEUS_NO_UPDATE_CHECK=1
 ```
 
+## Diagnostics and automation
+
+Run `codeus doctor` before first use or when support needs a health check. It validates the resolved config, auth token state, API base, model, workspace access, thread storage, telemetry path, permission mode, approved command prefixes, and authenticated account route when a token is available.
+
+Core inspection commands support machine-readable output:
+
+```bash
+codeus --output-format json doctor
+codeus --output-format json status
+codeus --output-format json state
+codeus --output-format json config show
+codeus --output-format json config env
+codeus --output-format json run "summarize this repo"
+```
+
+`status` reports the resolved model, API base, auth source, permission mode, current workspace, loaded `AGENTS.md` stats, saved thread count, trace path, and approved command prefixes. `state` reports the latest saved local thread.
+
+Permission modes can be set with `--permission-mode`, `CODEUS_PERMISSION_MODE`, or `config.toml`:
+
+```bash
+codeus --permission-mode read-only "summarize this repo"
+codeus config set permission_mode workspace-write
+```
+
+`read-only` allows workspace inspection tools and read-only command prefixes such as `git status`, `git diff`, `ls`, `pwd`, and `rg`. `workspace-write` is the default and allows exact-snippet file edits plus approved command prefixes.
+
 ## Development
 
 This is a Rust CLI, so Cargo is the build and debugging toolchain:
@@ -203,10 +254,21 @@ This is a Rust CLI, so Cargo is the build and debugging toolchain:
 ```bash
 cargo fmt
 cargo check
+cargo test
 cargo run -- "explain this repo"
 cargo run -- chat
 cargo build --release
 ```
+
+For hot reload during CLI development, install `cargo-watch` and run:
+
+```bash
+cargo install cargo-watch
+cargo watch -x 'run -- chat'
+cargo watch -x 'run -- "explain this repo"'
+```
+
+The test suite includes a deterministic mock proxy harness that starts a local `/v1` API, exercises `doctor`, `status --output-format json`, and a streamed `run`, and does not require real QC credentials.
 
 ## Vercel API proxy
 

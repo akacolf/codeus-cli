@@ -1,10 +1,67 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
+use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::fs;
 use std::path::PathBuf;
 
 pub const DEFAULT_API_BASE: &str = "https://api.quantumclub.sh/v1";
 pub const DEFAULT_MODEL: &str = "sonnet-4.6";
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+#[value(rename_all = "kebab-case")]
+pub enum PermissionMode {
+    ReadOnly,
+    #[default]
+    WorkspaceWrite,
+}
+
+impl PermissionMode {
+    pub fn parse(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "read-only" | "readonly" | "read_only" => Ok(Self::ReadOnly),
+            "workspace-write" | "workspace_write" | "workspacewrite" => Ok(Self::WorkspaceWrite),
+            _ => bail!("permission_mode must be read-only or workspace-write"),
+        }
+    }
+}
+
+impl fmt::Display for PermissionMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ReadOnly => write!(f, "read-only"),
+            Self::WorkspaceWrite => write!(f, "workspace-write"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+#[value(rename_all = "kebab-case")]
+pub enum SandboxPolicy {
+    #[default]
+    PolicyOnly,
+}
+
+impl SandboxPolicy {
+    pub fn parse(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "policy-only" | "policy_only" | "policyonly" | "dry-run" | "dry_run" => {
+                Ok(Self::PolicyOnly)
+            }
+            _ => bail!("sandbox_policy must be policy-only"),
+        }
+    }
+}
+
+impl fmt::Display for SandboxPolicy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PolicyOnly => write!(f, "policy-only"),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -16,6 +73,8 @@ pub struct Config {
     pub theme: Option<String>,
     pub font: Option<String>,
     pub approved_command_prefixes: Option<Vec<Vec<String>>>,
+    pub permission_mode: Option<PermissionMode>,
+    pub sandbox_policy: Option<SandboxPolicy>,
     pub onboarded: Option<bool>,
     pub update_check_disabled: Option<bool>,
     pub last_update_check_at: Option<u64>,
@@ -57,6 +116,22 @@ impl Config {
 
         Ok(())
     }
+}
+
+pub fn effective_permission_mode(config: &Config) -> PermissionMode {
+    std::env::var("CODEUS_PERMISSION_MODE")
+        .ok()
+        .and_then(|value| PermissionMode::parse(&value).ok())
+        .or(config.permission_mode)
+        .unwrap_or_default()
+}
+
+pub fn effective_sandbox_policy(config: &Config) -> SandboxPolicy {
+    std::env::var("CODEUS_SANDBOX_POLICY")
+        .ok()
+        .and_then(|value| SandboxPolicy::parse(&value).ok())
+        .or(config.sandbox_policy)
+        .unwrap_or_default()
 }
 
 pub fn config_path() -> Result<PathBuf> {

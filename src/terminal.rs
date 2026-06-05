@@ -144,6 +144,14 @@ impl Terminal {
         self.accent(&raw)
     }
 
+    pub fn composer_prompt(&self) -> String {
+        if self.color {
+            "\x1b[48;2;55;55;55m\x1b[38;2;245;245;245m\u{203a}\x1b[38;2;238;238;238m".to_string()
+        } else {
+            "\u{203a}".to_string()
+        }
+    }
+
     pub fn accent(&self, value: &str) -> String {
         if self.color {
             format!("{}{value}\x1b[0m", self.accent_code())
@@ -224,13 +232,13 @@ impl Terminal {
 
     fn accent_code(&self) -> &'static str {
         match self.palette {
-            Palette::Monokai => "\x1b[38;2;102;217;239m",
-            Palette::MonokaiLight => "\x1b[38;2;111;66;193m",
-            Palette::GitHubDark => "\x1b[38;2;121;192;255m",
-            Palette::GitHubLight => "\x1b[38;2;9;105;218m",
-            Palette::SolarizedDark => "\x1b[38;2;38;139;210m",
-            Palette::SolarizedLight => "\x1b[38;2;38;139;210m",
-            Palette::Ansi => "\x1b[36m",
+            Palette::Monokai => "\x1b[38;2;0;168;204m",
+            Palette::MonokaiLight => "\x1b[38;2;0;112;154m",
+            Palette::GitHubDark => "\x1b[38;2;56;139;253m",
+            Palette::GitHubLight => "\x1b[38;2;5;80;174m",
+            Palette::SolarizedDark => "\x1b[38;2;0;112;180m",
+            Palette::SolarizedLight => "\x1b[38;2;0;112;180m",
+            Palette::Ansi => "\x1b[34m",
         }
     }
 
