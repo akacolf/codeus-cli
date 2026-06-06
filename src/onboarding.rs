@@ -3,6 +3,7 @@ use crate::config::Config;
 use crate::terminal::{font_label, theme_label, Terminal, FONT_CHOICES, THEME_CHOICES};
 use anyhow::{bail, Context, Result};
 use std::io::{self, IsTerminal, Read, Write};
+use std::process;
 
 pub fn should_run(config: &Config) -> bool {
     config.session_token.is_none() && io::stdin().is_terminal() && io::stdout().is_terminal()
@@ -28,6 +29,10 @@ pub async fn run(
         |_| String::new(),
     )?;
 
+    let Selection::Choice(login_choice) = login_choice else {
+        unreachable!("login selector does not return custom font input");
+    };
+
     match login_choice + 1 {
         1 => {
             config.onboarded = Some(true);
@@ -45,18 +50,15 @@ pub async fn run(
                     clear_screen();
                     Ok(signed_in)
                 }
-                Err(error) => {
-                    println!(
-                        "{} Browser login could not finish: {error}",
-                        terminal.warn("•")
-                    );
+                Err(_) => {
+                    clear_screen();
                     println!(
                         "{}",
                         terminal.muted(
                             "You can run `codeus login` later, or `codeus login --token ...` for development/support."
                         )
                     );
-                    Ok(Config::load()?)
+                    process::exit(0);
                 }
             }
         }
@@ -78,7 +80,7 @@ pub fn choose_theme(config: &mut Config) -> Result<()> {
         .unwrap_or(0);
     let labels: Vec<&str> = THEME_CHOICES.iter().map(|choice| choice.label).collect();
 
-    let selected = select_index(
+    let selection = select_index(
         &Terminal::detect_with_theme(Some(current)),
         "Choose the text style that looks best with your terminal",
         "To change this later, run /theme",
@@ -89,7 +91,11 @@ pub fn choose_theme(config: &mut Config) -> Result<()> {
             let preview_terminal = Terminal::detect_with_theme(Some(THEME_CHOICES[index].key));
             print_theme_sample(&preview_terminal)
         },
-    )? + 1;
+    )?;
+    let Selection::Choice(selected) = selection else {
+        unreachable!("theme selector does not return custom font input");
+    };
+    let selected = selected + 1;
     let choice = THEME_CHOICES
         .get(selected - 1)
         .context("theme selection was out of range")?;
@@ -111,33 +117,30 @@ pub fn choose_font(config: &mut Config) -> Result<()> {
         .unwrap_or(custom_index);
     let labels: Vec<&str> = FONT_CHOICES.iter().map(|choice| choice.label).collect();
 
-    let selected = select_index(
+    let selection = select_index(
         &Terminal::detect_with_theme(config.theme.as_deref()),
         "Choose your coding font preference",
-        "To change this later, run /font",
+        "Terminal apps control the actual font; Codeus stores your preference.",
         &labels,
         current_index,
         SelectorStyle::Font,
         |index| print_font_sample(FONT_CHOICES[index].label),
     )?;
 
-    let choice = FONT_CHOICES
-        .get(selected)
-        .context("font selection was out of range")?;
-    config.font = if choice.key == "custom" {
-        Some(read_custom_font(current)?)
-    } else {
-        Some(choice.key.to_string())
+    config.font = match selection {
+        Selection::CustomFont(name) => Some(name),
+        Selection::Choice(selected) => {
+            let choice = FONT_CHOICES
+                .get(selected)
+                .context("font selection was out of range")?;
+            Some(choice.key.to_string())
+        }
     };
     config.save()?;
 
     let terminal = Terminal::detect_with_theme(config.theme.as_deref());
     let label = font_label(config.font.as_deref());
     println!("{}", terminal.success(&format!("Font preference: {label}")));
-    println!(
-        "{}",
-        terminal.muted("Terminal apps control the actual font; Codeus stores the preference.")
-    );
     Ok(())
 }
 
@@ -145,22 +148,33 @@ fn print_theme_sample(terminal: &Terminal) -> String {
     [
         terminal.muted("----------------------------------------"),
         format!(
-            "  1  {} {}() {{",
+            "  {}  {} {}() {{",
+            terminal.muted("1"),
             terminal.sample_keyword("function"),
             terminal.sample_function("greet")
         ),
         format!(
-            "  2    {}",
+            "  {}    {}",
+            terminal.muted("2"),
             terminal.sample_comment("// syntax preview follows this theme")
         ),
         format!(
-            "  3    {} message = {};",
+            "  {}    {} message = {};",
+            terminal.muted("3"),
             terminal.sample_keyword("const"),
             terminal.sample_string("\"Hello, Codeus!\"")
         ),
-        terminal.sample_deletion("  4 -  console.log(\"Hello, World!\");"),
-        terminal.sample_addition("  4 +  console.log(message);"),
-        "  5  }".to_string(),
+        format!(
+            "  {}{}",
+            terminal.muted("4"),
+            terminal.sample_deletion(" -  console.log(\"Hello, World!\");")
+        ),
+        format!(
+            "  {}{}",
+            terminal.muted("4"),
+            terminal.sample_addition(" +  console.log(message);")
+        ),
+        format!("  {}  }}", terminal.muted("5")),
         terminal.muted("----------------------------------------"),
     ]
     .join("\n")
@@ -179,27 +193,14 @@ fn print_font_sample(label: &str) -> String {
     .join("\n")
 }
 
-fn read_custom_font(current: &str) -> Result<String> {
-    let fallback = if FONT_CHOICES.iter().any(|choice| choice.key == current) {
-        "JetBrains Mono"
-    } else {
-        current
-    };
-
-    print!("Custom font name [{fallback}] > ");
-    io::stdout().flush()?;
-
-    let mut input = String::new();
-    if io::stdin().read_line(&mut input)? == 0 {
-        bail!("input closed before a custom font was entered");
-    }
-
-    let input = input.trim();
-    if input.is_empty() {
-        Ok(fallback.to_string())
-    } else {
-        Ok(input.to_string())
-    }
+fn custom_font_fallback(current: &str) -> String {
+    let fallback =
+        if current.trim().is_empty() || FONT_CHOICES.iter().any(|choice| choice.key == current) {
+            "JetBrains Mono"
+        } else {
+            current
+        };
+    fallback.to_string()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -207,6 +208,11 @@ enum SelectorStyle {
     Theme,
     Font,
     Login,
+}
+
+enum Selection {
+    Choice(usize),
+    CustomFont(String),
 }
 
 fn select_index<F>(
@@ -217,7 +223,7 @@ fn select_index<F>(
     default: usize,
     style: SelectorStyle,
     preview: F,
-) -> Result<usize>
+) -> Result<Selection>
 where
     F: Fn(usize) -> String,
 {
@@ -234,7 +240,7 @@ where
             choices.len(),
             default + 1,
         )
-        .map(|choice| choice - 1);
+        .map(|choice| Selection::Choice(choice - 1));
     }
 
     interactive_select(terminal, title, hint, choices, default, style, preview)
@@ -248,6 +254,7 @@ fn render_selector(
     selected: usize,
     style: SelectorStyle,
     preview: &str,
+    custom_font: Option<&str>,
 ) -> String {
     let selected_terminal;
     let terminal = match style {
@@ -278,15 +285,29 @@ fn render_selector(
     lines.push(String::new());
 
     for (index, choice) in choices.iter().enumerate() {
-        let line = format!(
-            "{} {}. {choice}",
-            if index == selected { ">" } else { " " },
-            index + 1
-        );
-        if index == selected {
-            lines.push(terminal.selection(&line));
+        let choice = if matches!(style, SelectorStyle::Font)
+            && index == FONT_CHOICES.len().saturating_sub(1)
+        {
+            custom_font
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| format!("Custom font name: {value}"))
+                .unwrap_or_else(|| (*choice).to_string())
         } else {
-            lines.push(line);
+            (*choice).to_string()
+        };
+        if index == selected {
+            lines.push(format!(
+                "{} {} {}",
+                terminal.selection(">"),
+                terminal.muted(&format!("{}.", index + 1)),
+                terminal.selection(&choice)
+            ));
+        } else {
+            lines.push(format!(
+                "  {} {}",
+                terminal.muted(&format!("{}.", index + 1)),
+                choice
+            ));
         }
     }
 
@@ -318,21 +339,40 @@ fn interactive_select<F>(
     default: usize,
     style: SelectorStyle,
     preview: F,
-) -> Result<usize>
+) -> Result<Selection>
 where
     F: Fn(usize) -> String,
 {
     #[cfg(unix)]
     {
         let _raw = RawMode::enable()?;
+        let _cursor = HiddenCursor::hide();
         let mut selected = default;
+        let mut previous_selected = default;
         let mut needs_render = true;
+        let mut custom_font = String::new();
         clear_screen();
         print!("\x1b7");
         io::stdout().flush()?;
 
         loop {
             if needs_render {
+                let preview_text;
+                let preview = if matches!(style, SelectorStyle::Font)
+                    && selected == FONT_CHOICES.len().saturating_sub(1)
+                {
+                    preview_text = print_font_sample(
+                        custom_font
+                            .trim()
+                            .is_empty()
+                            .then_some("Custom font name...")
+                            .unwrap_or_else(|| custom_font.trim()),
+                    );
+                    &preview_text
+                } else {
+                    preview_text = preview(selected);
+                    &preview_text
+                };
                 let output = render_selector(
                     terminal,
                     title,
@@ -340,7 +380,8 @@ where
                     choices,
                     selected,
                     style,
-                    &preview(selected),
+                    preview,
+                    Some(custom_font.as_str()),
                 );
 
                 print!("\x1b8\x1b[J");
@@ -351,10 +392,12 @@ where
 
             match read_key()? {
                 Key::Up | Key::Left => {
+                    previous_selected = selected;
                     selected = selected.checked_sub(1).unwrap_or(choices.len() - 1);
                     needs_render = true;
                 }
                 Key::Down | Key::Right | Key::Tab => {
+                    previous_selected = selected;
                     selected = (selected + 1) % choices.len();
                     needs_render = true;
                 }
@@ -372,25 +415,82 @@ where
                 }
                 Key::Enter => {
                     println!();
-                    return Ok(selected);
+                    if matches!(style, SelectorStyle::Font)
+                        && selected == FONT_CHOICES.len().saturating_sub(1)
+                    {
+                        let custom = custom_font.trim();
+                        let font = if custom.is_empty() {
+                            custom_font_fallback("")
+                        } else {
+                            custom.to_string()
+                        };
+                        return Ok(Selection::CustomFont(font));
+                    }
+                    return Ok(Selection::Choice(selected));
+                }
+                Key::Digit(value)
+                    if matches!(style, SelectorStyle::Font)
+                        && selected == FONT_CHOICES.len().saturating_sub(1) =>
+                {
+                    custom_font.push(char::from_digit(value as u32, 10).unwrap_or('0'));
+                    needs_render = true;
                 }
                 Key::Digit(value) if (1..=choices.len()).contains(&value) => {
                     let next = value - 1;
                     if next != selected {
+                        previous_selected = selected;
                         selected = next;
                         needs_render = true;
                     }
                 }
                 Key::Digit(_) => {}
+                Key::Char('k' | 'K')
+                    if !(matches!(style, SelectorStyle::Font)
+                        && selected == FONT_CHOICES.len().saturating_sub(1)) =>
+                {
+                    previous_selected = selected;
+                    selected = selected.checked_sub(1).unwrap_or(choices.len() - 1);
+                    needs_render = true;
+                }
+                Key::Char('j' | 'J')
+                    if !(matches!(style, SelectorStyle::Font)
+                        && selected == FONT_CHOICES.len().saturating_sub(1)) =>
+                {
+                    previous_selected = selected;
+                    selected = (selected + 1) % choices.len();
+                    needs_render = true;
+                }
+                Key::Backspace
+                    if matches!(style, SelectorStyle::Font)
+                        && selected == FONT_CHOICES.len().saturating_sub(1) =>
+                {
+                    custom_font.pop();
+                    needs_render = true;
+                }
+                Key::Char(value)
+                    if matches!(style, SelectorStyle::Font)
+                        && selected == FONT_CHOICES.len().saturating_sub(1) =>
+                {
+                    custom_font.push(value);
+                    needs_render = true;
+                }
                 Key::Escape => {
+                    if matches!(style, SelectorStyle::Font)
+                        && selected == FONT_CHOICES.len().saturating_sub(1)
+                    {
+                        custom_font.clear();
+                        selected = previous_selected.min(choices.len().saturating_sub(2));
+                        needs_render = true;
+                        continue;
+                    }
                     println!();
-                    return Ok(default);
+                    return Ok(Selection::Choice(default));
                 }
                 Key::Interrupt => {
                     println!();
                     bail!("selection cancelled");
                 }
-                Key::ToggleTheme | Key::Other => {}
+                Key::ToggleTheme | Key::Backspace | Key::Char(_) | Key::Other => {}
             }
         }
     }
@@ -402,7 +502,7 @@ where
             choices.len(),
             default + 1,
         )
-        .map(|choice| choice - 1)
+        .map(|choice| Selection::Choice(choice - 1))
     }
 }
 
@@ -418,6 +518,8 @@ enum Key {
     Tab,
     ToggleTheme,
     Digit(usize),
+    Backspace,
+    Char(char),
     Other,
 }
 
@@ -431,9 +533,8 @@ fn read_key() -> Result<Key> {
         b'\t' => Ok(Key::Tab),
         0x03 => Ok(Key::Interrupt),
         0x14 => Ok(Key::ToggleTheme),
+        0x7f | 0x08 => Ok(Key::Backspace),
         b'1'..=b'9' => Ok(Key::Digit((byte - b'0') as usize)),
-        b'j' | b'J' => Ok(Key::Down),
-        b'k' | b'K' => Ok(Key::Up),
         0x1b => {
             let sequence = read_escape_sequence(&mut stdin)?;
             if sequence.is_empty() {
@@ -448,6 +549,7 @@ fn read_key() -> Result<Key> {
                 _ => Ok(Key::Other),
             }
         }
+        byte if byte.is_ascii_graphic() || byte == b' ' => Ok(Key::Char(byte as char)),
         _ => Ok(Key::Other),
     }
 }
@@ -521,6 +623,30 @@ impl Drop for RawMode {
     fn drop(&mut self) {
         unsafe {
             libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &self.original);
+        }
+    }
+}
+
+#[cfg(unix)]
+struct HiddenCursor;
+
+#[cfg(unix)]
+impl HiddenCursor {
+    fn hide() -> Self {
+        if io::stdout().is_terminal() {
+            print!("\x1b[?25l");
+            let _ = io::stdout().flush();
+        }
+        Self
+    }
+}
+
+#[cfg(unix)]
+impl Drop for HiddenCursor {
+    fn drop(&mut self) {
+        if io::stdout().is_terminal() {
+            print!("\x1b[?25h");
+            let _ = io::stdout().flush();
         }
     }
 }
