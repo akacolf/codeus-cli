@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use tokio::net::TcpListener;
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mock_proxy_harness_covers_diagnostics_status_and_streaming() {
     let base_url = start_mock_proxy().await;
     let root = temp_root("codeus-mock-harness");
