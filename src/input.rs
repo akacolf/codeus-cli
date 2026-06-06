@@ -72,7 +72,7 @@ fn read_line(
     read_interactive_line(prompt, prompt_width, suggestions, chrome)
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn read_interactive_line(
     prompt: &str,
     prompt_width: usize,
@@ -731,7 +731,7 @@ fn terminal_width() -> Option<usize> {
     })
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn terminal_width_from_ioctl() -> Option<usize> {
     let mut winsize = libc::winsize {
         ws_row: 0,
@@ -912,7 +912,7 @@ enum Key {
     Other,
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn read_key() -> Result<Key> {
     let mut stdin = io::stdin().lock();
     let Some(byte) = read_byte_blocking(&mut stdin)? else {
@@ -941,7 +941,7 @@ fn read_key() -> Result<Key> {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn read_escape_key<R: Read>(reader: &mut R) -> Result<Key> {
     let sequence = read_escape_sequence(reader)?;
     if sequence.is_empty() {
@@ -960,7 +960,7 @@ fn read_escape_key<R: Read>(reader: &mut R) -> Result<Key> {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn read_escape_sequence<R: Read>(reader: &mut R) -> Result<Vec<u8>> {
     let mut sequence = Vec::with_capacity(8);
 
@@ -977,7 +977,7 @@ fn read_escape_sequence<R: Read>(reader: &mut R) -> Result<Vec<u8>> {
     Ok(sequence)
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn read_byte_blocking<R: Read>(reader: &mut R) -> Result<Option<u8>> {
     loop {
         if let Some(byte) = read_byte_timeout(reader)? {
@@ -986,19 +986,19 @@ fn read_byte_blocking<R: Read>(reader: &mut R) -> Result<Option<u8>> {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn read_byte_timeout<R: Read>(reader: &mut R) -> Result<Option<u8>> {
     let mut byte = [0u8; 1];
     let read = reader.read(&mut byte)?;
     Ok((read == 1).then_some(byte[0]))
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 struct RawMode {
     original: libc::termios,
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 impl RawMode {
     fn enable() -> Result<Self> {
         let fd = libc::STDIN_FILENO;
@@ -1024,7 +1024,7 @@ impl RawMode {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 impl Drop for RawMode {
     fn drop(&mut self) {
         unsafe {
