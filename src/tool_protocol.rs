@@ -1,4 +1,5 @@
 use crate::api::ChatToolCall;
+use crate::approval::{self, ApprovalDecision, ApprovalEngine, ToolSafety};
 use crate::config::{self, Config, PermissionMode};
 use crate::tools::{self, ToolObservation, ToolStatus};
 use anyhow::{Context, Result};
@@ -33,7 +34,33 @@ pub async fn execute_tool_call(
     cwd: &Path,
     config: &Config,
     call: &ModelToolCall,
+    approval: &mut ApprovalEngine,
 ) -> Result<ToolObservation> {
+    // Approval gate for write/command tools
+    let safety = approval::tool_safety(&call.name);
+    if safety != ToolSafety::ReadOnly {
+        let description = match call.name.as_str() {
+            "run_command" => string_arg(&call.args, "command").unwrap_or("").to_string(),
+            "replace_in_file" | "apply_patch" => {
+                string_arg(&call.args, "path").unwrap_or("").to_string()
+            }
+            _ => format!("{}", call.args),
+        };
+        match approval.check(&call.name, safety, &description)? {
+            ApprovalDecision::Denied => {
+                return Ok(denied(
+                    &call.name,
+                    &call.args,
+                    &format!(
+                        "Action denied by approval policy (mode: {}). Use --approval-mode auto-edit or full-auto to change.",
+                        approval.mode()
+                    ),
+                ));
+            }
+            _ => {}
+        }
+    }
+
     match call.name.as_str() {
         "list_files" => tools::list_files(cwd, string_arg(&call.args, "path")),
         "read_file" => {

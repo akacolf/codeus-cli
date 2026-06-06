@@ -135,7 +135,50 @@ impl Terminal {
 
     pub fn warn(&self, value: &str) -> String {
         if self.color {
-            format!("{}{value}\x1b[0m", self.warn_code())
+            format!("{}{}\x1b[0m", self.warn_code(), value)
+        } else {
+            value.to_string()
+        }
+    }
+
+    pub fn spinner_text(&self, value: &str) -> String {
+        if self.color {
+            format!("{}{}\x1b[0m", self.spinner_code(), value)
+        } else {
+            value.to_string()
+        }
+    }
+
+    pub fn thinking_indicator(&self, value: &str) -> String {
+        if self.color {
+            format!("\x1b[2m\x1b[3m{}\x1b[0m", value)
+        } else {
+            value.to_string()
+        }
+    }
+
+    pub fn agent_bullet(&self) -> String {
+        if self.color {
+            format!("{}\u{25CF}\x1b[0m", self.accent_code())
+        } else {
+            "●".to_string()
+        }
+    }
+
+    pub fn prompt_highlight(&self, value: &str) -> String {
+        if self.color {
+            format!(
+                "\x1b[48;2;60;60;60m\x1b[38;2;220;220;220m {} \x1b[0m",
+                value
+            )
+        } else {
+            format!("> {}", value)
+        }
+    }
+
+    pub fn token_stats(&self, value: &str) -> String {
+        if self.color {
+            format!("\x1b[2m{}\x1b[0m", value)
         } else {
             value.to_string()
         }
@@ -237,6 +280,16 @@ impl Terminal {
             Palette::SolarizedDark | Palette::SolarizedLight => "\x1b[38;2;181;54;130m",
             Palette::Ansi => "\x1b[33m",
             _ => "\x1b[38;2;230;219;116m",
+        }
+    }
+
+    fn spinner_code(&self) -> &'static str {
+        match self.palette {
+            Palette::GitHubDark => "\x1b[38;2;210;153;34m",
+            Palette::GitHubLight => "\x1b[38;2;154;103;0m",
+            Palette::SolarizedDark | Palette::SolarizedLight => "\x1b[38;2;181;137;0m",
+            Palette::Ansi => "\x1b[33m",
+            _ => "\x1b[38;2;230;160;60m",
         }
     }
 

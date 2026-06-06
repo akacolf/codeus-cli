@@ -63,6 +63,40 @@ impl fmt::Display for SandboxPolicy {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+#[value(rename_all = "kebab-case")]
+pub enum ApprovalMode {
+    /// Ask before every write and command (safest).
+    #[default]
+    Suggest,
+    /// Auto-approve file edits, ask for shell commands.
+    AutoEdit,
+    /// Auto-approve everything. Only for isolated environments.
+    FullAuto,
+}
+
+impl ApprovalMode {
+    pub fn parse(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "suggest" => Ok(Self::Suggest),
+            "auto-edit" | "auto_edit" | "autoedit" => Ok(Self::AutoEdit),
+            "full-auto" | "full_auto" | "fullauto" => Ok(Self::FullAuto),
+            _ => bail!("approval_mode must be suggest, auto-edit, or full-auto"),
+        }
+    }
+}
+
+impl fmt::Display for ApprovalMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Suggest => write!(f, "suggest"),
+            Self::AutoEdit => write!(f, "auto-edit"),
+            Self::FullAuto => write!(f, "full-auto"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     pub api_base: Option<String>,
@@ -74,6 +108,7 @@ pub struct Config {
     pub approved_command_prefixes: Option<Vec<Vec<String>>>,
     pub permission_mode: Option<PermissionMode>,
     pub sandbox_policy: Option<SandboxPolicy>,
+    pub approval_mode: Option<ApprovalMode>,
     pub onboarded: Option<bool>,
     pub update_check_disabled: Option<bool>,
     pub last_update_check_at: Option<u64>,
@@ -130,6 +165,14 @@ pub fn effective_sandbox_policy(config: &Config) -> SandboxPolicy {
         .ok()
         .and_then(|value| SandboxPolicy::parse(&value).ok())
         .or(config.sandbox_policy)
+        .unwrap_or_default()
+}
+
+pub fn effective_approval_mode(config: &Config) -> ApprovalMode {
+    std::env::var("CODEUS_APPROVAL_MODE")
+        .ok()
+        .and_then(|value| ApprovalMode::parse(&value).ok())
+        .or(config.approval_mode)
         .unwrap_or_default()
 }
 

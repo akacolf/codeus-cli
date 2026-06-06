@@ -105,6 +105,20 @@ pub fn build_report(config: &Config) -> Result<HarnessReport> {
             ),
         },
         HarnessCapability {
+            name: "approval_system",
+            status: HarnessStatus::Ready,
+            detail: format!(
+                "3-tier approval mode (suggest/auto-edit/full-auto); current: {}",
+                config::effective_approval_mode(config)
+            ),
+        },
+        HarnessCapability {
+            name: "deny_rules",
+            status: HarnessStatus::Ready,
+            detail: "dangerous command patterns (rm -rf, chmod 777, etc.) are always blocked"
+                .to_string(),
+        },
+        HarnessCapability {
             name: "sandboxing",
             status: match sandbox_policy {
                 SandboxPolicy::PolicyOnly => HarnessStatus::Partial,

@@ -63,6 +63,14 @@ pub struct ChatToolFunction {
 pub struct ChatCompletion {
     pub content: String,
     pub tool_calls: Vec<ChatToolCall>,
+    pub usage: Option<UsageStats>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct UsageStats {
+    pub prompt_tokens: Option<u64>,
+    pub completion_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -550,6 +558,7 @@ fn find_sse_boundary(buffer: &str) -> Option<(usize, usize)> {
 struct StreamingCompletion {
     content: String,
     tool_calls: Vec<StreamingToolCall>,
+    usage: Option<UsageStats>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -581,6 +590,7 @@ impl StreamingCompletion {
                     },
                 })
                 .collect(),
+            usage: self.usage,
         }
     }
 }
@@ -621,6 +631,15 @@ where
             for tool_call in tool_calls {
                 merge_streaming_tool_call(completion, tool_call);
             }
+        }
+
+        // Parse usage stats if present
+        if let Some(usage) = parsed.get("usage") {
+            completion.usage = Some(UsageStats {
+                prompt_tokens: usage.get("prompt_tokens").and_then(|v| v.as_u64()),
+                completion_tokens: usage.get("completion_tokens").and_then(|v| v.as_u64()),
+                total_tokens: usage.get("total_tokens").and_then(|v| v.as_u64()),
+            });
         }
     }
 

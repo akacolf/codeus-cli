@@ -1,5 +1,7 @@
 mod account;
+mod agent_ui;
 mod api;
+mod approval;
 mod auth;
 mod config;
 mod context;
@@ -8,6 +10,7 @@ mod harness_report;
 mod input;
 mod onboarding;
 mod repl;
+mod sandbox;
 mod telemetry;
 mod terminal;
 mod thread_store;
@@ -18,7 +21,9 @@ mod update;
 use anyhow::{bail, Context, Result};
 use api::{ClientConfig, CodeusClient, Message};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use config::{Config, PermissionMode, SandboxPolicy, DEFAULT_API_BASE, DEFAULT_MODEL};
+use config::{
+    ApprovalMode, Config, PermissionMode, SandboxPolicy, DEFAULT_API_BASE, DEFAULT_MODEL,
+};
 use serde::Serialize;
 use serde_json::json;
 use std::io::{self, Write};
@@ -44,6 +49,9 @@ struct Cli {
     #[arg(long, global = true, env = "CODEUS_SANDBOX_POLICY", value_enum)]
     sandbox_policy: Option<SandboxPolicy>,
 
+    #[arg(long, global = true, env = "CODEUS_APPROVAL_MODE", value_enum)]
+    approval_mode: Option<ApprovalMode>,
+
     #[arg(
         long,
         global = true,
@@ -66,6 +74,7 @@ struct GlobalOptions {
     token: Option<String>,
     permission_mode: Option<PermissionMode>,
     sandbox_policy: Option<SandboxPolicy>,
+    approval_mode: Option<ApprovalMode>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -164,6 +173,9 @@ async fn main() -> Result<()> {
     if let Some(sandbox_policy) = cli.sandbox_policy {
         std::env::set_var("CODEUS_SANDBOX_POLICY", sandbox_policy.to_string());
     }
+    if let Some(approval_mode) = cli.approval_mode {
+        std::env::set_var("CODEUS_APPROVAL_MODE", approval_mode.to_string());
+    }
     let stored = Config::load()?;
     let globals = GlobalOptions {
         api_base: cli.api_base.clone(),
@@ -171,6 +183,7 @@ async fn main() -> Result<()> {
         token: cli.token.clone(),
         permission_mode: cli.permission_mode,
         sandbox_policy: cli.sandbox_policy,
+        approval_mode: cli.approval_mode,
     };
 
     match cli.command {
@@ -359,6 +372,7 @@ async fn login(args: LoginArgs) -> Result<()> {
         token: None,
         permission_mode: None,
         sandbox_policy: None,
+        approval_mode: None,
     };
     let stored = Config::load()?;
     auth::login_with_browser(globals.api_base, globals.model, &stored, args.no_browser)
@@ -498,6 +512,9 @@ fn config_command(
                 "sandbox_policy" => {
                     config.sandbox_policy = Some(SandboxPolicy::parse(&value)?);
                 }
+                "approval_mode" => {
+                    config.approval_mode = Some(ApprovalMode::parse(&value)?);
+                }
                 "token_expires_at" => {
                     config.token_expires_at = Some(
                         value
@@ -529,6 +546,7 @@ fn config_command(
                 "refresh_token" => config.refresh_token = None,
                 "permission_mode" => config.permission_mode = None,
                 "sandbox_policy" => config.sandbox_policy = None,
+                "approval_mode" => config.approval_mode = None,
                 "token_expires_at" => config.token_expires_at = None,
                 "update_check_disabled" => config.update_check_disabled = None,
                 "last_update_check_at" => config.last_update_check_at = None,
@@ -598,6 +616,7 @@ struct StatusReport {
     auth: AuthReport,
     permission_mode: String,
     sandbox_policy: String,
+    approval_mode: String,
     config_path: PathBuf,
     cwd: PathBuf,
     context: ContextReport,
@@ -887,6 +906,7 @@ fn build_status_report(globals: &GlobalOptions, stored: &Config) -> Result<Statu
         auth: build_auth_report(globals, stored),
         permission_mode: resolve_permission_mode(globals, stored).to_string(),
         sandbox_policy: resolve_sandbox_policy(globals, stored).to_string(),
+        approval_mode: resolve_approval_mode(globals, stored).to_string(),
         config_path: config::config_path()?,
         cwd,
         context: ContextReport {
@@ -961,6 +981,7 @@ fn print_status_text(report: &StatusReport) {
     );
     println!("  permission mode: {}", report.permission_mode);
     println!("  sandbox policy: {}", report.sandbox_policy);
+    println!("  approval mode: {}", report.approval_mode);
     println!("  cwd: {}", report.cwd.display());
     println!("  config: {}", report.config_path.display());
     println!("  threads: {}", report.threads.count);
@@ -1010,6 +1031,7 @@ fn env_report() -> Vec<EnvVarReport> {
         ("CODEUS_SESSION_TOKEN", true),
         ("CODEUS_PERMISSION_MODE", false),
         ("CODEUS_SANDBOX_POLICY", false),
+        ("CODEUS_APPROVAL_MODE", false),
         ("CODEUS_OUTPUT_FORMAT", false),
         ("CODEUS_NO_UPDATE_CHECK", false),
         ("CODEUS_UPDATE_ENDPOINT", false),
@@ -1153,6 +1175,18 @@ fn resolve_sandbox_policy(globals: &GlobalOptions, stored: &Config) -> SandboxPo
                 .and_then(|value| SandboxPolicy::parse(&value).ok())
         })
         .or(stored.sandbox_policy)
+        .unwrap_or_default()
+}
+
+fn resolve_approval_mode(globals: &GlobalOptions, stored: &Config) -> ApprovalMode {
+    globals
+        .approval_mode
+        .or_else(|| {
+            std::env::var("CODEUS_APPROVAL_MODE")
+                .ok()
+                .and_then(|value| ApprovalMode::parse(&value).ok())
+        })
+        .or(stored.approval_mode)
         .unwrap_or_default()
 }
 

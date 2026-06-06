@@ -1,4 +1,5 @@
 use crate::api::CodeusClient;
+use crate::approval::ApprovalEngine;
 use crate::config::Config;
 use crate::harness::Session;
 use crate::input::{self, PromptOutcome, Suggestion};
@@ -8,7 +9,7 @@ use crate::terminal::Terminal;
 use crate::tool_protocol;
 use crate::tools::{ToolObservation, ToolStatus};
 use anyhow::{Context, Result};
-use std::io::{self, Write};
+use std::io::{self, IsTerminal};
 use std::time::Instant;
 
 const MAX_MODEL_TOOL_STEPS: usize = 4;
@@ -114,7 +115,7 @@ pub async fn run(client: CodeusClient) -> Result<()> {
             );
         }
 
-        run_agent_turn(&client, &terminal, &mut session).await?;
+        run_agent_turn(&client, &terminal, &mut session, &input).await?;
     }
 
     Ok(())
@@ -124,7 +125,10 @@ async fn run_agent_turn(
     client: &CodeusClient,
     terminal: &Terminal,
     session: &mut Session,
+    user_prompt: &str,
 ) -> Result<()> {
+    let config = Config::load()?;
+    let mut approval = ApprovalEngine::new(&config);
     for step in 0..MAX_MODEL_TOOL_STEPS {
         let messages = session.messages_for_turn()?;
         let _ = telemetry::record(
@@ -138,7 +142,8 @@ async fn run_agent_turn(
         );
 
         let started = Instant::now();
-        let response = stream_model_response(client, terminal, &messages).await?;
+        let prompt_for_step = if step == 0 { user_prompt } else { "" };
+        let response = stream_model_response(client, terminal, &messages, prompt_for_step).await?;
         let elapsed_ms = started.elapsed().as_millis();
         let _ = telemetry::record(
             "codeus.turn.finished",
@@ -161,8 +166,13 @@ async fn run_agent_turn(
                         "{}",
                         terminal.muted(&format!("QC Codeus requested tool `{}`", call.name))
                     );
-                    let observation =
-                        tool_protocol::execute_tool_call(session.cwd(), &config, &call).await?;
+                    let observation = tool_protocol::execute_tool_call(
+                        session.cwd(),
+                        &config,
+                        &call,
+                        &mut approval,
+                    )
+                    .await?;
                     print_observation(terminal, &observation);
                     session.record_tool_result(tool_call.id, observation.as_context_message())?;
                 }
@@ -174,7 +184,8 @@ async fn run_agent_turn(
                 );
                 let config = Config::load()?;
                 let observation =
-                    tool_protocol::execute_tool_call(session.cwd(), &config, &call).await?;
+                    tool_protocol::execute_tool_call(session.cwd(), &config, &call, &mut approval)
+                        .await?;
                 print_observation(terminal, &observation);
                 session.record_tool(&observation)?;
             }
@@ -216,50 +227,116 @@ async fn stream_model_response(
     client: &CodeusClient,
     terminal: &Terminal,
     messages: &[crate::api::Message],
+    prompt_text: &str,
 ) -> Result<ModelResponse> {
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
+    let mut renderer = crate::agent_ui::TurnRenderer::new(terminal, prompt_text);
+
+    // Enable raw mode for ESC detection during streaming.
+    let _raw = RawModeGuard::enable()?;
+
+    renderer.start_thinking();
+
     let mut text = String::new();
     let mut printed = false;
 
     let completion = client
         .stream_chat_completion(messages, |delta| {
+            // Check for ESC interrupt
+            if renderer.poll_interrupt() {
+                return Err(anyhow::anyhow!("interrupted"));
+            }
+            renderer.tick(); // Update spinner animation
             text.push_str(delta);
             if printed {
-                write!(out, "{delta}")?;
-                out.flush()?;
+                renderer.on_delta(delta);
                 return Ok(());
             }
 
-            let trimmed = text.trim_start();
-            if tool_protocol::TOOL_CALL_OPEN.starts_with(trimmed)
-                || trimmed.starts_with(tool_protocol::TOOL_CALL_OPEN)
-            {
+            if should_buffer_potential_tool_call(&text) {
                 return Ok(());
             }
 
-            print!("{}", terminal.accent("QC Codeus"));
-            print!(" ");
-            write!(out, "{text}")?;
-            out.flush()?;
+            renderer.on_delta(&text);
             printed = true;
             Ok(())
         })
-        .await?;
+        .await;
 
-    if printed {
-        println!();
+    match completion {
+        Ok(completion) => {
+            renderer.finish();
+            let text = if text.is_empty() {
+                completion.content.clone()
+            } else {
+                text
+            };
+            Ok(ModelResponse {
+                text,
+                printed,
+                tool_calls: completion.tool_calls,
+            })
+        }
+        Err(_e) if renderer.is_interrupted() => {
+            renderer.finish_interrupted();
+            Ok(ModelResponse {
+                text,
+                printed,
+                tool_calls: Vec::new(),
+            })
+        }
+        Err(e) => {
+            renderer.finish();
+            Err(e)
+        }
+    }
+}
+
+fn should_buffer_potential_tool_call(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    tool_protocol::TOOL_CALL_OPEN.starts_with(trimmed)
+        || trimmed.starts_with(tool_protocol::TOOL_CALL_OPEN)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn buffers_partial_tool_call_prefix() {
+        assert!(should_buffer_potential_tool_call("<"));
+        assert!(should_buffer_potential_tool_call("<codeus_tool"));
+        assert!(should_buffer_potential_tool_call(
+            "  <codeus_tool_call>{\"name\":\"read_file\"}"
+        ));
     }
 
-    if text.is_empty() {
-        text = completion.content.clone();
+    #[test]
+    fn does_not_buffer_normal_text() {
+        assert!(!should_buffer_potential_tool_call("hello"));
+        assert!(!should_buffer_potential_tool_call("I can help with that."));
     }
+}
 
-    Ok(ModelResponse {
-        text,
-        printed,
-        tool_calls: completion.tool_calls,
-    })
+struct RawModeGuard {
+    enabled: bool,
+}
+
+impl RawModeGuard {
+    fn enable() -> Result<Self> {
+        let enabled = io::stdin().is_terminal() && io::stdout().is_terminal();
+        if enabled {
+            crossterm::terminal::enable_raw_mode()?;
+        }
+        Ok(Self { enabled })
+    }
+}
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        if self.enabled {
+            let _ = crossterm::terminal::disable_raw_mode();
+        }
+    }
 }
 
 enum CommandResult {

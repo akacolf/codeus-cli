@@ -638,9 +638,7 @@ fn input_line(prompt: &str, input_text: &str, width: usize) -> String {
     let prompt = paint_on_input_bg(prompt);
     let input_text = truncate_visible(input_text, width.saturating_sub(visible_chars(&prompt)));
     let input_text = paint_on_input_bg(&input_text);
-    format!(
-        "{INPUT_BG}{prompt}{INPUT_BG}{input_text}{INPUT_BG}\x1b[K\x1b[0m\r\n"
-    )
+    format!("{INPUT_BG}{prompt}{INPUT_BG}{input_text}{INPUT_BG}\x1b[K\x1b[0m\r\n")
 }
 
 fn composer_draw_width(terminal_width: usize) -> usize {
