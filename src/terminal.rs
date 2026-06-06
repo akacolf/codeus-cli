@@ -6,12 +6,6 @@ pub struct ThemeChoice {
     pub label: &'static str,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct FontChoice {
-    pub key: &'static str,
-    pub label: &'static str,
-}
-
 pub const THEME_CHOICES: &[ThemeChoice] = &[
     ThemeChoice {
         key: "auto",
@@ -51,65 +45,6 @@ pub const THEME_CHOICES: &[ThemeChoice] = &[
     },
 ];
 
-pub const FONT_CHOICES: &[FontChoice] = &[
-    FontChoice {
-        key: "auto",
-        label: "Terminal default",
-    },
-    FontChoice {
-        key: "jetbrains-mono",
-        label: "JetBrains Mono",
-    },
-    FontChoice {
-        key: "fira-code",
-        label: "Fira Code",
-    },
-    FontChoice {
-        key: "cascadia-code",
-        label: "Cascadia Code",
-    },
-    FontChoice {
-        key: "sf-mono",
-        label: "SF Mono",
-    },
-    FontChoice {
-        key: "menlo",
-        label: "Menlo",
-    },
-    FontChoice {
-        key: "monaco",
-        label: "Monaco",
-    },
-    FontChoice {
-        key: "consolas",
-        label: "Consolas",
-    },
-    FontChoice {
-        key: "source-code-pro",
-        label: "Source Code Pro",
-    },
-    FontChoice {
-        key: "ibm-plex-mono",
-        label: "IBM Plex Mono",
-    },
-    FontChoice {
-        key: "inconsolata",
-        label: "Inconsolata",
-    },
-    FontChoice {
-        key: "ubuntu-mono",
-        label: "Ubuntu Mono",
-    },
-    FontChoice {
-        key: "dejavu-sans-mono",
-        label: "DejaVu Sans Mono",
-    },
-    FontChoice {
-        key: "custom",
-        label: "Custom font name...",
-    },
-];
-
 pub struct Terminal {
     color: bool,
     palette: Palette,
@@ -143,14 +78,6 @@ impl Terminal {
         };
 
         Self { color, palette }
-    }
-
-    pub fn logo(&self) -> String {
-        self.logo_lines()
-            .into_iter()
-            .map(|line| self.warn(&line))
-            .collect::<Vec<_>>()
-            .join("\n")
     }
 
     pub fn logo_lines(&self) -> Vec<String> {
@@ -403,15 +330,6 @@ pub fn theme_label(key: &str) -> Option<&'static str> {
         .iter()
         .find(|choice| choice.key == key)
         .map(|choice| choice.label)
-}
-
-pub fn font_label(font: Option<&str>) -> String {
-    let key = font.unwrap_or("auto");
-    FONT_CHOICES
-        .iter()
-        .find(|choice| choice.key == key)
-        .map(|choice| choice.label.to_string())
-        .unwrap_or_else(|| key.to_string())
 }
 
 #[derive(Debug, Clone, Copy)]

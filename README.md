@@ -50,7 +50,7 @@ codeus config set permission_mode read-only
 codeus config set sandbox_policy policy-only
 ```
 
-Running `codeus` with no arguments starts the interactive CLI. First launch shows the Codeus logo, lets users choose a named syntax-style terminal theme and coding font preference with a live preview, then signs in with a Quantum Club account.
+Running `codeus` with no arguments starts the interactive CLI. First launch shows the Codeus logo, lets users choose a named syntax-style terminal theme with a live preview, then signs in with a Quantum Club account.
 
 The default API base is:
 
@@ -64,47 +64,28 @@ https://api.quantumclub.sh/v1
 
 ```text
 /help, /commands       Show the command list
-/status                Show model, API base, cwd, and thread size
-/threads               List saved local threads
-/resume [id|latest]    Resume a saved thread
-/compact               Compact older messages into summary context
-/files [path]          List workspace files
-/read <path>           Read a workspace file into the thread
-/search <pattern> [path] Search workspace text
-/git status|diff       Run safe git inspection commands
-/run <command>         Run an approved command prefix
-/approvals             Show approved command prefixes
-/harness               Show local agent-harness readiness
-/trace                 Show local telemetry status
-/theme                 Change the terminal theme and font
-/font                  Change the coding font preference
-/login [--no-browser]  Connect a QC account
-/logout                Remove the stored session
-/cwd [path], /cd [path] Show or change the session working directory
-/model                 Show the active model
-/api                   Show the active API base
-/clear, /reset         Clear this thread
-/logo                  Print the Codeus logo
+/status                Show account, model, project, and context
+/resume [id|latest]    Resume a saved chat
+/swap                  Show Omniston v1beta8 swap helper
+/theme                 Change the terminal theme
+/model                 Show available models
+/clear, /reset         Clear context and start fresh
 /exit, /quit           Leave chat
 ```
 
-Plain text is sent as a chat message after a QC account is connected. Typing `/` opens the command menu underneath the prompt, filters as you type, and lets Tab complete the highlighted command. Changing `/cwd` resets the active transcript so the model gets fresh workspace context.
+Plain text is sent as a chat message after a QC account is connected. Typing `/` opens the command menu underneath the prompt, filters as you type, and lets Tab complete the highlighted command.
 
-Each interactive session is recorded as a JSONL thread under:
+Each interactive session is recorded as a JSONL saved chat under:
 
 ```text
 ~/.config/codeus/threads
 ```
 
-Use `/threads` to list recent threads and `/resume latest` or `/resume <id>` to continue one. Codeus builds model context deterministically on each turn from the current working directory, any compacted conversation summary, and `AGENTS.override.md` / `AGENTS.md` files from the project root down to the current directory. Repository instruction files are capped to a 32 KiB budget so they do not crowd out the conversation.
+Use `/resume latest` or `/resume <id>` to continue one. Codeus builds model context deterministically on each turn from the current working directory, any compacted conversation summary, and `AGENTS.override.md` / `AGENTS.md` files from the project root down to the current directory. Repository instruction files are capped to a 32 KiB budget so they do not crowd out the conversation. Codeus also auto-compacts once the active transcript grows beyond the local byte budget, keeping the newest messages live.
 
-Use `/compact` to fold older messages into a local summary. Codeus also auto-compacts once the active transcript grows beyond the local byte budget, keeping the newest messages live.
+## Internal tools and approvals
 
-## Local tools and approvals
-
-Codeus exposes typed local tools through slash commands. `/files`, `/read`, and `/search` are restricted to the active workspace, skip large generated directories where recursive traversal is needed, and truncate large outputs before saving them into the thread. `/git status` and `/git diff` are read-only inspection commands.
-
-The model can also request local tools during a turn through native Chat Completions tool calls. Codeus sends the local tool schema with each chat request, executes returned tool calls with the same workspace and approval rules, records tool observations, then asks the model to continue. A hidden `codeus_tool_call` block remains as a fallback for upstreams that ignore native tool schemas. A turn is capped at four model-requested tool steps to avoid loops.
+The model can request local tools during a turn through native Chat Completions tool calls. Codeus sends the local tool schema with each chat request, executes returned tool calls with the same workspace and approval rules, records tool observations, then asks the model to continue. A hidden `codeus_tool_call` block remains as a fallback for upstreams that ignore native tool schemas. A turn is capped at four model-requested tool steps to avoid loops.
 
 Supported model-requested tool names are:
 
@@ -131,7 +112,7 @@ run_command
 }
 ```
 
-`/run` does not invoke a shell. It parses shell-style quoting into an argv vector and runs it only when the structured command policy matches an approved rule. Built-in prefixes are:
+`run_command` does not invoke a shell. It parses shell-style quoting into an argv vector and runs it only when the structured command policy matches an approved rule. Built-in prefixes are:
 
 ```text
 cargo check
@@ -151,8 +132,6 @@ approved_command_prefixes = [
 ]
 ```
 
-Use `/approvals` to see the effective prefix list.
-
 Command execution currently uses a `policy-only` sandbox policy: Codeus enforces argv policy, workspace permission mode, timeouts, and output limits, but it does not claim native macOS Seatbelt or Linux namespace isolation yet.
 
 Set `CODEUS_TRACE=1` to write local JSONL telemetry events to:
@@ -162,19 +141,6 @@ Set `CODEUS_TRACE=1` to write local JSONL telemetry events to:
 ```
 
 Trace events currently cover local tool observations and model turn latency. They are disabled by default.
-
-## Agent harness posture
-
-Run `codeus harness` to inspect the local harness foundation and the remaining gaps against the best ideas from modern terminal agents:
-
-```bash
-codeus harness
-codeus --output-format json harness
-```
-
-The report checks the Rust CLI core, hosted proxy default, workspace context loading, native model tool loop, command policy, permission mode, thread store, telemetry, and the deterministic mock proxy harness. It also maps the current repository to the security workflow popularized by Anthropic's reference harness: recon/threat-model, find, triage, report, and patch artifacts.
-
-This is intentionally a readiness report, not an autonomous vulnerability runner. The Anthropic reference pipeline executes target code behind gVisor/Docker isolation; Codeus CLI currently stays distribution-friendly and Rust-native, so target-code execution should wait until real OS/container sandboxing is wired in.
 
 ## Configuration
 
@@ -218,11 +184,8 @@ The first-run setup stores only local CLI preferences and the Codeus session:
 
 ```toml
 theme = "auto"
-font = "jetbrains-mono"
 onboarded = true
 ```
-
-The font preference records what the user wants Codeus to use in terminal-themed surfaces. Terminal emulators still control the actual rendered font, so users may need to select the matching font in their terminal profile.
 
 `codeus` checks for CLI updates at startup at most once per day. The default update metadata is the `codeus-release.json` asset attached to the latest GitHub Release. Disable checks with:
 
@@ -238,13 +201,12 @@ CODEUS_NO_UPDATE_CHECK=1
 
 ## Diagnostics and automation
 
-Run `codeus doctor` before first use or when support needs a health check. It validates the resolved config, auth token state, API base, model, workspace access, thread storage, telemetry path, permission mode, approved command prefixes, and authenticated account route when a token is available.
+Run `codeus doctor` before first use or when support needs a health check. It validates the resolved config, auth token state, API base, model, workspace access, saved-chat storage, telemetry path, permission mode, approved command prefixes, and authenticated account route when a token is available.
 
 Core inspection commands support machine-readable output:
 
 ```bash
 codeus --output-format json doctor
-codeus --output-format json harness
 codeus --output-format json status
 codeus --output-format json state
 codeus --output-format json config show
@@ -252,7 +214,7 @@ codeus --output-format json config env
 codeus --output-format json run "summarize this repo"
 ```
 
-`status` reports the resolved model, API base, auth source, permission mode, current workspace, loaded `AGENTS.md` stats, saved thread count, trace path, and approved command prefixes. `state` reports the latest saved local thread.
+`status` reports the resolved model, auth source, permission mode, current workspace, loaded `AGENTS.md` stats, saved chat count, trace path, and approved command prefixes. `state` reports the latest saved local chat.
 
 Permission modes can be set with `--permission-mode`, `CODEUS_PERMISSION_MODE`, or `config.toml`:
 

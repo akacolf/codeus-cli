@@ -113,15 +113,6 @@ impl Session {
         self.refresh_context()
     }
 
-    pub fn set_cwd(&mut self, cwd: PathBuf) -> Result<()> {
-        self.cwd = cwd;
-        self.transcript.clear();
-        self.summary = None;
-        self.store.append_cwd(&self.cwd)?;
-        self.store.append_reset()?;
-        self.refresh_context()
-    }
-
     pub fn maybe_auto_compact(&mut self) -> Result<Option<usize>> {
         if transcript_bytes(&self.transcript) <= AUTO_COMPACT_BYTES {
             return Ok(None);

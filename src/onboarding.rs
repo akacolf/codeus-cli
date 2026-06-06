@@ -1,6 +1,6 @@
 use crate::auth;
 use crate::config::Config;
-use crate::terminal::{font_label, theme_label, Terminal, FONT_CHOICES, THEME_CHOICES};
+use crate::terminal::{theme_label, Terminal, THEME_CHOICES};
 use anyhow::{bail, Context, Result};
 use std::io::{self, IsTerminal, Read, Write};
 use std::process;
@@ -15,7 +15,6 @@ pub async fn run(
     mut config: Config,
 ) -> Result<Config> {
     choose_theme(&mut config)?;
-    choose_font(&mut config)?;
     let terminal = Terminal::detect_with_theme(config.theme.as_deref());
 
     let login_choices = ["Sign in with Quantum Club"];
@@ -29,9 +28,7 @@ pub async fn run(
         |_| String::new(),
     )?;
 
-    let Selection::Choice(login_choice) = login_choice else {
-        unreachable!("login selector does not return custom font input");
-    };
+    let Selection::Choice(login_choice) = login_choice;
 
     match login_choice + 1 {
         1 => {
@@ -42,9 +39,6 @@ pub async fn run(
                     signed_in.onboarded = Some(true);
                     if signed_in.theme.is_none() {
                         signed_in.theme = config.theme;
-                    }
-                    if signed_in.font.is_none() {
-                        signed_in.font = config.font;
                     }
                     signed_in.save()?;
                     clear_screen();
@@ -68,7 +62,6 @@ pub async fn run(
 
 pub fn choose_appearance(config: &mut Config) -> Result<()> {
     choose_theme(config)?;
-    choose_font(config)?;
     Ok(())
 }
 
@@ -92,9 +85,7 @@ pub fn choose_theme(config: &mut Config) -> Result<()> {
             print_theme_sample(&preview_terminal)
         },
     )?;
-    let Selection::Choice(selected) = selection else {
-        unreachable!("theme selector does not return custom font input");
-    };
+    let Selection::Choice(selected) = selection;
     let selected = selected + 1;
     let choice = THEME_CHOICES
         .get(selected - 1)
@@ -105,42 +96,6 @@ pub fn choose_theme(config: &mut Config) -> Result<()> {
     let label = theme_label(choice.key).unwrap_or(choice.label);
     let terminal = Terminal::detect_with_theme(Some(choice.key));
     println!("{}", terminal.success(&format!("Text style: {label}")));
-    Ok(())
-}
-
-pub fn choose_font(config: &mut Config) -> Result<()> {
-    let current = config.font.as_deref().unwrap_or("auto");
-    let custom_index = FONT_CHOICES.len() - 1;
-    let current_index = FONT_CHOICES
-        .iter()
-        .position(|choice| choice.key == current)
-        .unwrap_or(custom_index);
-    let labels: Vec<&str> = FONT_CHOICES.iter().map(|choice| choice.label).collect();
-
-    let selection = select_index(
-        &Terminal::detect_with_theme(config.theme.as_deref()),
-        "Choose your coding font preference",
-        "Terminal apps control the actual font; Codeus stores your preference.",
-        &labels,
-        current_index,
-        SelectorStyle::Font,
-        |index| print_font_sample(FONT_CHOICES[index].label),
-    )?;
-
-    config.font = match selection {
-        Selection::CustomFont(name) => Some(name),
-        Selection::Choice(selected) => {
-            let choice = FONT_CHOICES
-                .get(selected)
-                .context("font selection was out of range")?;
-            Some(choice.key.to_string())
-        }
-    };
-    config.save()?;
-
-    let terminal = Terminal::detect_with_theme(config.theme.as_deref());
-    let label = font_label(config.font.as_deref());
-    println!("{}", terminal.success(&format!("Font preference: {label}")));
     Ok(())
 }
 
@@ -180,39 +135,14 @@ fn print_theme_sample(terminal: &Terminal) -> String {
     .join("\n")
 }
 
-fn print_font_sample(label: &str) -> String {
-    [
-        "----------------------------------------".to_string(),
-        format!("  Font: {label}"),
-        "  abcdefghijklmnopqrstuvwxyz".to_string(),
-        "  ABCDEFGHIJKLMNOPQRSTUVWXYZ".to_string(),
-        "  0123456789  {} [] () <> /\\ |".to_string(),
-        "  fn main() { println!(\"Codeus\"); }".to_string(),
-        "----------------------------------------".to_string(),
-    ]
-    .join("\n")
-}
-
-fn custom_font_fallback(current: &str) -> String {
-    let fallback =
-        if current.trim().is_empty() || FONT_CHOICES.iter().any(|choice| choice.key == current) {
-            "JetBrains Mono"
-        } else {
-            current
-        };
-    fallback.to_string()
-}
-
 #[derive(Debug, Clone, Copy)]
 enum SelectorStyle {
     Theme,
-    Font,
     Login,
 }
 
 enum Selection {
     Choice(usize),
-    CustomFont(String),
 }
 
 fn select_index<F>(
@@ -254,11 +184,10 @@ fn render_selector(
     selected: usize,
     style: SelectorStyle,
     preview: &str,
-    custom_font: Option<&str>,
 ) -> String {
     let selected_terminal;
     let terminal = match style {
-        SelectorStyle::Font | SelectorStyle::Login => terminal,
+        SelectorStyle::Login => terminal,
         SelectorStyle::Theme => {
             selected_terminal = Terminal::detect_with_theme(Some(THEME_CHOICES[selected].key));
             &selected_terminal
@@ -266,15 +195,12 @@ fn render_selector(
     };
 
     let mut lines = Vec::new();
-    if matches!(
-        style,
-        SelectorStyle::Theme | SelectorStyle::Font | SelectorStyle::Login
-    ) {
+    if matches!(style, SelectorStyle::Theme | SelectorStyle::Login) {
         lines.push(String::new());
         lines.extend(terminal.welcome_art_lines());
         lines.push(String::new());
     }
-    if matches!(style, SelectorStyle::Theme | SelectorStyle::Font) {
+    if matches!(style, SelectorStyle::Theme) {
         lines.push("Let's get started.".to_string());
         lines.push(String::new());
     }
@@ -285,22 +211,12 @@ fn render_selector(
     lines.push(String::new());
 
     for (index, choice) in choices.iter().enumerate() {
-        let choice = if matches!(style, SelectorStyle::Font)
-            && index == FONT_CHOICES.len().saturating_sub(1)
-        {
-            custom_font
-                .filter(|value| !value.trim().is_empty())
-                .map(|value| format!("Custom font name: {value}"))
-                .unwrap_or_else(|| (*choice).to_string())
-        } else {
-            (*choice).to_string()
-        };
         if index == selected {
             lines.push(format!(
                 "{} {} {}",
                 terminal.selection(">"),
                 terminal.muted(&format!("{}.", index + 1)),
-                terminal.selection(&choice)
+                terminal.selection(choice)
             ));
         } else {
             lines.push(format!(
@@ -348,9 +264,7 @@ where
         let _raw = RawMode::enable()?;
         let _cursor = HiddenCursor::hide();
         let mut selected = default;
-        let mut previous_selected = default;
         let mut needs_render = true;
-        let mut custom_font = String::new();
         clear_screen();
         print!("\x1b7");
         io::stdout().flush()?;
@@ -358,31 +272,10 @@ where
         loop {
             if needs_render {
                 let preview_text;
-                let preview = if matches!(style, SelectorStyle::Font)
-                    && selected == FONT_CHOICES.len().saturating_sub(1)
-                {
-                    preview_text = print_font_sample(
-                        custom_font
-                            .trim()
-                            .is_empty()
-                            .then_some("Custom font name...")
-                            .unwrap_or_else(|| custom_font.trim()),
-                    );
-                    &preview_text
-                } else {
-                    preview_text = preview(selected);
-                    &preview_text
-                };
-                let output = render_selector(
-                    terminal,
-                    title,
-                    hint,
-                    choices,
-                    selected,
-                    style,
-                    preview,
-                    Some(custom_font.as_str()),
-                );
+                preview_text = preview(selected);
+                let preview = &preview_text;
+                let output =
+                    render_selector(terminal, title, hint, choices, selected, style, preview);
 
                 print!("\x1b8\x1b[J");
                 print!("{output}");
@@ -392,12 +285,10 @@ where
 
             match read_key()? {
                 Key::Up | Key::Left => {
-                    previous_selected = selected;
                     selected = selected.checked_sub(1).unwrap_or(choices.len() - 1);
                     needs_render = true;
                 }
                 Key::Down | Key::Right | Key::Tab => {
-                    previous_selected = selected;
                     selected = (selected + 1) % choices.len();
                     needs_render = true;
                 }
@@ -415,74 +306,25 @@ where
                 }
                 Key::Enter => {
                     println!();
-                    if matches!(style, SelectorStyle::Font)
-                        && selected == FONT_CHOICES.len().saturating_sub(1)
-                    {
-                        let custom = custom_font.trim();
-                        let font = if custom.is_empty() {
-                            custom_font_fallback("")
-                        } else {
-                            custom.to_string()
-                        };
-                        return Ok(Selection::CustomFont(font));
-                    }
                     return Ok(Selection::Choice(selected));
-                }
-                Key::Digit(value)
-                    if matches!(style, SelectorStyle::Font)
-                        && selected == FONT_CHOICES.len().saturating_sub(1) =>
-                {
-                    custom_font.push(char::from_digit(value as u32, 10).unwrap_or('0'));
-                    needs_render = true;
                 }
                 Key::Digit(value) if (1..=choices.len()).contains(&value) => {
                     let next = value - 1;
                     if next != selected {
-                        previous_selected = selected;
                         selected = next;
                         needs_render = true;
                     }
                 }
                 Key::Digit(_) => {}
-                Key::Char('k' | 'K')
-                    if !(matches!(style, SelectorStyle::Font)
-                        && selected == FONT_CHOICES.len().saturating_sub(1)) =>
-                {
-                    previous_selected = selected;
+                Key::Char('k' | 'K') => {
                     selected = selected.checked_sub(1).unwrap_or(choices.len() - 1);
                     needs_render = true;
                 }
-                Key::Char('j' | 'J')
-                    if !(matches!(style, SelectorStyle::Font)
-                        && selected == FONT_CHOICES.len().saturating_sub(1)) =>
-                {
-                    previous_selected = selected;
+                Key::Char('j' | 'J') => {
                     selected = (selected + 1) % choices.len();
                     needs_render = true;
                 }
-                Key::Backspace
-                    if matches!(style, SelectorStyle::Font)
-                        && selected == FONT_CHOICES.len().saturating_sub(1) =>
-                {
-                    custom_font.pop();
-                    needs_render = true;
-                }
-                Key::Char(value)
-                    if matches!(style, SelectorStyle::Font)
-                        && selected == FONT_CHOICES.len().saturating_sub(1) =>
-                {
-                    custom_font.push(value);
-                    needs_render = true;
-                }
                 Key::Escape => {
-                    if matches!(style, SelectorStyle::Font)
-                        && selected == FONT_CHOICES.len().saturating_sub(1)
-                    {
-                        custom_font.clear();
-                        selected = previous_selected.min(choices.len().saturating_sub(2));
-                        needs_render = true;
-                        continue;
-                    }
                     println!();
                     return Ok(Selection::Choice(default));
                 }

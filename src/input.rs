@@ -20,13 +20,17 @@ pub struct ComposerChrome {
     pub picker_hint: String,
     pub active_commands: Vec<String>,
     pub help_rows: Vec<HelpRow>,
+    pub status_rows: Vec<StatusRow>,
+    pub prompt_suggestions: Vec<String>,
 }
 
+#[derive(Clone)]
 pub struct HelpRow {
     pub command: String,
     pub detail: String,
 }
 
+#[derive(Clone)]
 pub struct StatusRow {
     pub label: String,
     pub value: String,
@@ -82,7 +86,6 @@ fn read_interactive_line(
     let mut menu_start = 0usize;
     let mut menu_hidden = false;
 
-    print!("\x1b7");
     render_prompt(
         prompt,
         prompt_width,
@@ -93,6 +96,7 @@ fn read_interactive_line(
         menu_start,
         chrome,
         menu_hidden,
+        false,
     )?;
 
     loop {
@@ -111,8 +115,9 @@ fn read_interactive_line(
                 if !matches.is_empty() && command_picker_input(&input) {
                     let line = matches[selected].value.to_string();
                     if chrome.is_some_and(|chrome| is_help_command(&line, chrome)) {
+                        clear_composer_area(chrome.is_some());
                         if let Some(chrome) = chrome {
-                            show_help_view_and_restore_composer(chrome)?;
+                            show_help_view(chrome)?;
                         }
                         input.clear();
                         cursor = 0;
@@ -129,10 +134,35 @@ fn read_interactive_line(
                             menu_start,
                             chrome,
                             menu_hidden,
+                            false,
                         )?;
                         continue;
                     }
-                    print!("\x1b8\x1b[J");
+                    if chrome.is_some_and(|chrome| is_status_command(&line, chrome)) {
+                        clear_composer_area(chrome.is_some());
+                        if let Some(chrome) = chrome {
+                            show_status_view(&chrome.status_rows)?;
+                        }
+                        input.clear();
+                        cursor = 0;
+                        selected = 0;
+                        menu_start = 0;
+                        menu_hidden = false;
+                        render_prompt(
+                            prompt,
+                            prompt_width,
+                            &input,
+                            cursor,
+                            suggestions,
+                            selected,
+                            menu_start,
+                            chrome,
+                            menu_hidden,
+                            false,
+                        )?;
+                        continue;
+                    }
+                    clear_composer_area(chrome.is_some());
                     if let Some(chrome) = chrome {
                         render_static_composer(prompt, &line, chrome)?;
                     } else {
@@ -144,8 +174,9 @@ fn read_interactive_line(
 
                 let line = input.iter().collect::<String>().trim().to_string();
                 if chrome.is_some_and(|chrome| is_help_command(&line, chrome)) {
+                    clear_composer_area(chrome.is_some());
                     if let Some(chrome) = chrome {
-                        show_help_view_and_restore_composer(chrome)?;
+                        show_help_view(chrome)?;
                     }
                     input.clear();
                     cursor = 0;
@@ -162,10 +193,35 @@ fn read_interactive_line(
                         menu_start,
                         chrome,
                         menu_hidden,
+                        false,
                     )?;
                     continue;
                 }
-                print!("\x1b8\x1b[J");
+                if chrome.is_some_and(|chrome| is_status_command(&line, chrome)) {
+                    clear_composer_area(chrome.is_some());
+                    if let Some(chrome) = chrome {
+                        show_status_view(&chrome.status_rows)?;
+                    }
+                    input.clear();
+                    cursor = 0;
+                    selected = 0;
+                    menu_start = 0;
+                    menu_hidden = false;
+                    render_prompt(
+                        prompt,
+                        prompt_width,
+                        &input,
+                        cursor,
+                        suggestions,
+                        selected,
+                        menu_start,
+                        chrome,
+                        menu_hidden,
+                        false,
+                    )?;
+                    continue;
+                }
+                clear_composer_area(chrome.is_some());
                 if let Some(chrome) = chrome {
                     render_static_composer(prompt, &line, chrome)?;
                 } else {
@@ -175,7 +231,7 @@ fn read_interactive_line(
                 return Ok(PromptOutcome::Line(line));
             }
             Key::Interrupt => {
-                print!("\x1b8\x1b[J");
+                clear_composer_area(chrome.is_some());
                 if let Some(chrome) = chrome {
                     render_static_composer(prompt, "", chrome)?;
                 } else {
@@ -185,7 +241,8 @@ fn read_interactive_line(
                 return Ok(PromptOutcome::Interrupted);
             }
             Key::EndOfInput if input.is_empty() => {
-                print!("\x1b8\x1b[J\n");
+                clear_composer_area(chrome.is_some());
+                println!();
                 io::stdout().flush()?;
                 return Ok(PromptOutcome::Eof);
             }
@@ -293,6 +350,7 @@ fn read_interactive_line(
             menu_start,
             chrome,
             menu_hidden,
+            true,
         )?;
     }
 }
@@ -325,6 +383,7 @@ fn render_prompt(
     menu_start: usize,
     chrome: Option<&ComposerChrome>,
     menu_hidden: bool,
+    clear_existing: bool,
 ) -> Result<()> {
     let matches = if menu_hidden {
         Vec::new()
@@ -332,20 +391,27 @@ fn render_prompt(
         matching_suggestions(input, suggestions)
     };
     let input_text = styled_input(input, suggestions, chrome);
+    let display_input = if input.is_empty() {
+        placeholder_input(chrome)
+    } else {
+        input_text
+    };
     let line_width = terminal_width().unwrap_or(DEFAULT_COMPOSER_WIDTH);
-    let used_width = prompt_width + input.len();
+    let used_width = prompt_width + visible_chars(&display_input);
     let padding = line_width.saturating_sub(used_width);
 
-    print!("\x1b8\x1b[J");
+    if clear_existing {
+        clear_composer_area(chrome.is_some());
+    }
 
     let footer_lines = if let Some(chrome) = chrome {
         render_rule(line_width);
-        print!("{prompt}{input_text}{}\x1b[0m\n", " ".repeat(padding));
+        render_input_line(prompt, &display_input, padding);
         render_rule(line_width);
         render_footer(line_width, chrome, !matches.is_empty());
         3
     } else {
-        print!("{prompt}{input_text}{}\x1b[0m", " ".repeat(padding));
+        print!("{prompt}{display_input}{}\x1b[0m", " ".repeat(padding));
         0
     };
 
@@ -381,11 +447,43 @@ fn render_prompt(
 fn render_static_composer(prompt: &str, line: &str, chrome: &ComposerChrome) -> Result<()> {
     let line_width = terminal_width().unwrap_or(DEFAULT_COMPOSER_WIDTH);
     render_rule(line_width);
-    println!("{prompt}{line}\x1b[0m");
+    let padding = line_width.saturating_sub(visible_chars(prompt) + line.chars().count());
+    render_input_line(prompt, line, padding);
     render_rule(line_width);
     render_footer(line_width, chrome, false);
     io::stdout().flush()?;
     Ok(())
+}
+
+fn clear_composer_area(has_chrome: bool) {
+    if has_chrome {
+        print!("\r\x1b[1A\x1b[J");
+    } else {
+        print!("\r\x1b[J");
+    }
+}
+
+fn render_input_line(prompt: &str, input_text: &str, padding: usize) {
+    const INPUT_BG: &str = "\x1b[48;2;38;38;38m";
+    let prompt = prompt.replace("\x1b[0m", "\x1b[0m\x1b[48;2;38;38;38m");
+    print!(
+        "{INPUT_BG}{prompt}{INPUT_BG}{input_text}{INPUT_BG}{}\x1b[0m\n",
+        " ".repeat(padding)
+    );
+}
+
+fn placeholder_input(chrome: Option<&ComposerChrome>) -> String {
+    let Some(suggestion) = chrome
+        .and_then(|chrome| chrome.prompt_suggestions.first())
+        .filter(|suggestion| !suggestion.trim().is_empty())
+    else {
+        return String::new();
+    };
+    if color_enabled() {
+        format!("\x1b[2m{suggestion}\x1b[0m")
+    } else {
+        suggestion.to_string()
+    }
 }
 
 fn render_rule(width: usize) {
@@ -409,17 +507,6 @@ fn render_footer(width: usize, chrome: &ComposerChrome, picker_active: bool) {
         " ".repeat(padding.saturating_sub(2)),
         right
     );
-}
-
-fn show_help_view_and_restore_composer(chrome: &ComposerChrome) -> Result<()> {
-    print!("\x1b8\x1b[J");
-    io::stdout().flush()?;
-
-    let result = show_help_view(chrome);
-
-    print!("\x1b7");
-    io::stdout().flush()?;
-    result
 }
 
 fn show_help_view(chrome: &ComposerChrome) -> Result<()> {
@@ -763,6 +850,18 @@ fn is_help_command(input_text: &str, chrome: &ComposerChrome) -> bool {
     ["/help", "/commands", "/?"]
         .iter()
         .any(|known| known.eq_ignore_ascii_case(command))
+        && chrome
+            .active_commands
+            .iter()
+            .any(|known| known.eq_ignore_ascii_case(command))
+}
+
+fn is_status_command(input_text: &str, chrome: &ComposerChrome) -> bool {
+    let Some(command) = input_text.split_whitespace().next() else {
+        return false;
+    };
+
+    command.eq_ignore_ascii_case("/status")
         && chrome
             .active_commands
             .iter()

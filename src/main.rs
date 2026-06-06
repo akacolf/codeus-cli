@@ -493,7 +493,6 @@ fn config_command(
                 "theme" => config.theme = Some(value),
                 "session_token" | "token" => config.session_token = Some(value),
                 "refresh_token" => config.refresh_token = Some(value),
-                "font" => config.font = Some(value),
                 "permission_mode" => {
                     config.permission_mode = Some(PermissionMode::parse(&value)?);
                 }
@@ -529,7 +528,6 @@ fn config_command(
                 "theme" => config.theme = None,
                 "session_token" | "token" => config.session_token = None,
                 "refresh_token" => config.refresh_token = None,
-                "font" => config.font = None,
                 "permission_mode" => config.permission_mode = None,
                 "sandbox_policy" => config.sandbox_policy = None,
                 "token_expires_at" => config.token_expires_at = None,

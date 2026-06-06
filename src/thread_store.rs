@@ -123,13 +123,6 @@ impl ThreadStore {
         })
     }
 
-    pub fn append_cwd(&self, cwd: &Path) -> Result<()> {
-        self.append(&ThreadRecord::Cwd {
-            cwd: cwd.to_path_buf(),
-            timestamp: now_secs(),
-        })
-    }
-
     pub fn append_reset(&self) -> Result<()> {
         self.append(&ThreadRecord::Reset {
             timestamp: now_secs(),
