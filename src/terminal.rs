@@ -95,9 +95,9 @@ impl Terminal {
 
     pub fn composer_prompt(&self) -> String {
         if self.color {
-            "\x1b[38;2;245;245;245m>\x1b[0m ".to_string()
+            "\x1b[38;2;245;245;245m›\x1b[0m ".to_string()
         } else {
-            "> ".to_string()
+            "› ".to_string()
         }
     }
 

@@ -21,7 +21,6 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use config::{Config, PermissionMode, SandboxPolicy, DEFAULT_API_BASE, DEFAULT_MODEL};
 use serde::Serialize;
 use serde_json::json;
-use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -1059,6 +1058,7 @@ fn check_config_permissions(
 
     #[cfg(unix)]
     {
+        use std::fs;
         use std::os::unix::fs::PermissionsExt;
         match fs::metadata(path) {
             Ok(metadata) => {

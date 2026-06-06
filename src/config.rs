@@ -71,7 +71,6 @@ pub struct Config {
     pub refresh_token: Option<String>,
     pub token_expires_at: Option<u64>,
     pub theme: Option<String>,
-    pub font: Option<String>,
     pub approved_command_prefixes: Option<Vec<Vec<String>>>,
     pub permission_mode: Option<PermissionMode>,
     pub sandbox_policy: Option<SandboxPolicy>,

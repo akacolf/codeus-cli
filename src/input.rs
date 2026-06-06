@@ -1,12 +1,14 @@
-use anyhow::{bail, Result};
-use std::io::{self, IsTerminal, Read, Write};
+use anyhow::Result;
+use std::io::{self, IsTerminal, Write};
 
 const DEFAULT_COMPOSER_WIDTH: usize = 120;
 const COMMAND_COLUMN_WIDTH: usize = 18;
 const MAX_MENU_ROWS: usize = 5;
-const FOOTER_RIGHT_MARGIN: usize = 2;
 const COMPOSER_SAFE_AREA_LINES: usize = 2;
+const COMPOSER_BAND_LINES: usize = 3;
+const COMPOSER_INPUT_LINE_OFFSET: usize = 1;
 const ACTIVE_COLOR: &str = "\x1b[1m\x1b[38;2;0;168;204m";
+const INPUT_BG: &str = "\x1b[48;2;48;48;48m";
 
 #[derive(Debug, Clone, Copy)]
 pub struct Suggestion<'a> {
@@ -15,9 +17,6 @@ pub struct Suggestion<'a> {
 }
 
 pub struct ComposerChrome {
-    pub left_hint: String,
-    pub right_hint: String,
-    pub picker_hint: String,
     pub active_commands: Vec<String>,
     pub help_rows: Vec<HelpRow>,
     pub status_rows: Vec<StatusRow>,
@@ -317,6 +316,15 @@ fn read_interactive_line(
                 menu_start = 0;
                 menu_hidden = true;
             }
+            Key::Tab => {
+                if let Some(suggestion) = matching_prompt_suggestion(&input, chrome) {
+                    input = suggestion.chars().collect();
+                    cursor = input.len();
+                    selected = 0;
+                    menu_start = 0;
+                    menu_hidden = true;
+                }
+            }
             Key::Char(value) => {
                 if value == '/' && !matches.is_empty() && command_picker_input(&input) {
                     input = autocomplete_command(matches[selected]);
@@ -337,7 +345,7 @@ fn read_interactive_line(
                 selected = 0;
                 menu_start = 0;
             }
-            Key::Up | Key::Down | Key::Tab | Key::Other => {}
+            Key::Up | Key::Down | Key::Other => {}
         }
 
         render_prompt(
@@ -355,7 +363,7 @@ fn read_interactive_line(
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn read_interactive_line(
     prompt: &str,
     _prompt_width: usize,
@@ -404,12 +412,9 @@ fn render_prompt(
         clear_composer_area(chrome.is_some());
     }
 
-    let footer_lines = if let Some(chrome) = chrome {
-        render_rule(line_width);
-        render_input_line(prompt, &display_input, padding);
-        render_rule(line_width);
-        render_footer(line_width, chrome, !matches.is_empty());
-        3
+    let input_lines = if chrome.is_some() {
+        render_input_band(prompt, &display_input, padding, line_width);
+        COMPOSER_BAND_LINES
     } else {
         print!("{prompt}{display_input}{}\x1b[0m", " ".repeat(padding));
         0
@@ -426,11 +431,14 @@ fn render_prompt(
     }
 
     if chrome.is_some() || menu_lines > 0 {
-        let up_lines = menu_lines + footer_lines + COMPOSER_SAFE_AREA_LINES;
+        let up_lines = menu_lines + input_lines + COMPOSER_SAFE_AREA_LINES;
         if up_lines > 0 {
             print!("\x1b[{up_lines}A");
         }
         print!("\r");
+        if chrome.is_some() {
+            print!("\x1b[{COMPOSER_INPUT_LINE_OFFSET}B");
+        }
         let column = prompt_width + input.iter().take(cursor).count();
         print!("\x1b[{column}C");
     } else {
@@ -444,28 +452,35 @@ fn render_prompt(
     Ok(())
 }
 
-fn render_static_composer(prompt: &str, line: &str, chrome: &ComposerChrome) -> Result<()> {
+fn render_static_composer(prompt: &str, line: &str, _chrome: &ComposerChrome) -> Result<()> {
     let line_width = terminal_width().unwrap_or(DEFAULT_COMPOSER_WIDTH);
-    render_rule(line_width);
     let padding = line_width.saturating_sub(visible_chars(prompt) + line.chars().count());
-    render_input_line(prompt, line, padding);
-    render_rule(line_width);
-    render_footer(line_width, chrome, false);
+    render_input_band(prompt, line, padding, line_width);
     io::stdout().flush()?;
     Ok(())
 }
 
 fn clear_composer_area(has_chrome: bool) {
     if has_chrome {
-        print!("\r\x1b[1A\x1b[J");
+        print!("\r\x1b[{COMPOSER_INPUT_LINE_OFFSET}A\x1b[J");
     } else {
         print!("\r\x1b[J");
     }
 }
 
+fn render_input_band(prompt: &str, input_text: &str, padding: usize, width: usize) {
+    render_blank_input_line(width);
+    render_input_line(prompt, input_text, padding);
+    render_blank_input_line(width);
+}
+
+fn render_blank_input_line(width: usize) {
+    println!("{INPUT_BG}{}\x1b[0m", " ".repeat(width));
+}
+
 fn render_input_line(prompt: &str, input_text: &str, padding: usize) {
-    const INPUT_BG: &str = "\x1b[48;2;38;38;38m";
-    let prompt = prompt.replace("\x1b[0m", "\x1b[0m\x1b[48;2;38;38;38m");
+    let prompt = paint_on_input_bg(prompt);
+    let input_text = paint_on_input_bg(input_text);
     print!(
         "{INPUT_BG}{prompt}{INPUT_BG}{input_text}{INPUT_BG}{}\x1b[0m\n",
         " ".repeat(padding)
@@ -486,27 +501,8 @@ fn placeholder_input(chrome: Option<&ComposerChrome>) -> String {
     }
 }
 
-fn render_rule(width: usize) {
-    let width = width.max(12);
-    println!("\x1b[2m{}\x1b[0m", "─".repeat(width));
-}
-
-fn render_footer(width: usize, chrome: &ComposerChrome, picker_active: bool) {
-    let left = &chrome.left_hint;
-    let right = if picker_active {
-        &chrome.picker_hint
-    } else {
-        &chrome.right_hint
-    };
-    let left_width = visible_chars(left);
-    let right_width = visible_chars(right);
-    let padding = width.saturating_sub(left_width + right_width + FOOTER_RIGHT_MARGIN);
-    println!(
-        "  {}\x1b[2m{}{}\x1b[0m",
-        left,
-        " ".repeat(padding.saturating_sub(2)),
-        right
-    );
+fn paint_on_input_bg(value: &str) -> String {
+    value.replace("\x1b[0m", &format!("\x1b[0m{INPUT_BG}"))
 }
 
 fn show_help_view(chrome: &ComposerChrome) -> Result<()> {
@@ -723,29 +719,16 @@ fn visible_chars(value: &str) -> usize {
 }
 
 fn terminal_width() -> Option<usize> {
-    terminal_width_from_ioctl().or_else(|| {
-        std::env::var("COLUMNS")
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-            .filter(|width| *width >= 40)
-    })
-}
-
-#[cfg(any(unix, windows))]
-fn terminal_width_from_ioctl() -> Option<usize> {
-    let mut winsize = libc::winsize {
-        ws_row: 0,
-        ws_col: 0,
-        ws_xpixel: 0,
-        ws_ypixel: 0,
-    };
-    let result = unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut winsize) };
-    (result == 0 && winsize.ws_col >= 40).then_some(winsize.ws_col as usize)
-}
-
-#[cfg(not(unix))]
-fn terminal_width_from_ioctl() -> Option<usize> {
-    None
+    crossterm::terminal::size()
+        .ok()
+        .map(|(width, _)| width as usize)
+        .filter(|width| *width >= 40)
+        .or_else(|| {
+            std::env::var("COLUMNS")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|width| *width >= 40)
+        })
 }
 
 fn color_enabled() -> bool {
@@ -838,6 +821,29 @@ fn matching_suggestions<'a>(
     exact.chain(prefix).collect()
 }
 
+fn matching_prompt_suggestion<'a>(
+    input: &[char],
+    chrome: Option<&'a ComposerChrome>,
+) -> Option<&'a str> {
+    let chrome = chrome?;
+    let text = input.iter().collect::<String>();
+    if text.starts_with('/') {
+        return None;
+    }
+    let text = text.trim_start();
+    chrome
+        .prompt_suggestions
+        .iter()
+        .find(|suggestion| {
+            !suggestion.trim().is_empty()
+                && (text.is_empty()
+                    || suggestion
+                        .to_ascii_lowercase()
+                        .starts_with(&text.to_ascii_lowercase()))
+        })
+        .map(String::as_str)
+}
+
 fn command_picker_input(input: &[char]) -> bool {
     !input.is_empty() && input[0] == '/' && !input.iter().any(|ch| ch.is_whitespace())
 }
@@ -889,7 +895,7 @@ fn delete_previous_word(input: &mut Vec<char>, cursor: &mut usize) {
     *cursor = start;
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Key {
     Char(char),
     Backspace,
@@ -912,123 +918,68 @@ enum Key {
     Other,
 }
 
-#[cfg(any(unix, windows))]
 fn read_key() -> Result<Key> {
-    let mut stdin = io::stdin().lock();
-    let Some(byte) = read_byte_blocking(&mut stdin)? else {
-        return Ok(Key::Other);
-    };
-
-    match byte {
-        b'\n' | b'\r' => Ok(Key::Enter),
-        b'\t' => Ok(Key::Tab),
-        0x01 => Ok(Key::Home),
-        0x02 => Ok(Key::Left),
-        0x03 => Ok(Key::Interrupt),
-        0x04 => Ok(Key::EndOfInput),
-        0x05 => Ok(Key::End),
-        0x06 => Ok(Key::Right),
-        0x0b => Ok(Key::DeleteToEnd),
-        0x0c => Ok(Key::ClearScreen),
-        0x0e => Ok(Key::Down),
-        0x10 => Ok(Key::Up),
-        0x15 => Ok(Key::DeleteLine),
-        0x17 => Ok(Key::DeletePreviousWord),
-        0x08 | 0x7f => Ok(Key::Backspace),
-        0x1b => read_escape_key(&mut stdin),
-        b' '..=b'~' => Ok(Key::Char(byte as char)),
-        _ => Ok(Key::Other),
-    }
-}
-
-#[cfg(any(unix, windows))]
-fn read_escape_key<R: Read>(reader: &mut R) -> Result<Key> {
-    let sequence = read_escape_sequence(reader)?;
-    if sequence.is_empty() {
-        return Ok(Key::Escape);
-    }
-
-    match sequence.as_slice() {
-        [b'[', b'A'] => Ok(Key::Up),
-        [b'[', b'B'] => Ok(Key::Down),
-        [b'[', b'C'] => Ok(Key::Right),
-        [b'[', b'D'] => Ok(Key::Left),
-        [b'[', b'H'] | [b'O', b'H'] => Ok(Key::Home),
-        [b'[', b'F'] | [b'O', b'F'] => Ok(Key::End),
-        [b'[', b'3', b'~'] => Ok(Key::Delete),
-        _ => Ok(Key::Other),
-    }
-}
-
-#[cfg(any(unix, windows))]
-fn read_escape_sequence<R: Read>(reader: &mut R) -> Result<Vec<u8>> {
-    let mut sequence = Vec::with_capacity(8);
-
-    for _ in 0..8 {
-        let Some(byte) = read_byte_timeout(reader)? else {
-            break;
-        };
-        sequence.push(byte);
-        if byte.is_ascii_alphabetic() || byte == b'~' {
-            break;
-        }
-    }
-
-    Ok(sequence)
-}
-
-#[cfg(any(unix, windows))]
-fn read_byte_blocking<R: Read>(reader: &mut R) -> Result<Option<u8>> {
     loop {
-        if let Some(byte) = read_byte_timeout(reader)? {
-            return Ok(Some(byte));
+        let event = crossterm::event::read()?;
+        if let crossterm::event::Event::Key(event) = event {
+            return Ok(key_from_event(event));
         }
     }
 }
 
-#[cfg(any(unix, windows))]
-fn read_byte_timeout<R: Read>(reader: &mut R) -> Result<Option<u8>> {
-    let mut byte = [0u8; 1];
-    let read = reader.read(&mut byte)?;
-    Ok((read == 1).then_some(byte[0]))
+fn key_from_event(event: crossterm::event::KeyEvent) -> Key {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    if event.modifiers.contains(KeyModifiers::CONTROL) {
+        match event.code {
+            KeyCode::Char('a' | 'A') => return Key::Home,
+            KeyCode::Char('b' | 'B') => return Key::Left,
+            KeyCode::Char('c' | 'C') => return Key::Interrupt,
+            KeyCode::Char('d' | 'D') => return Key::EndOfInput,
+            KeyCode::Char('e' | 'E') => return Key::End,
+            KeyCode::Char('f' | 'F') => return Key::Right,
+            KeyCode::Char('k' | 'K') => return Key::DeleteToEnd,
+            KeyCode::Char('l' | 'L') => return Key::ClearScreen,
+            KeyCode::Char('n' | 'N') => return Key::Down,
+            KeyCode::Char('p' | 'P') => return Key::Up,
+            KeyCode::Char('u' | 'U') => return Key::DeleteLine,
+            KeyCode::Char('w' | 'W') => return Key::DeletePreviousWord,
+            _ => {}
+        }
+    }
+
+    match event.code {
+        KeyCode::Char(value) => Key::Char(value),
+        KeyCode::Enter => Key::Enter,
+        KeyCode::Tab => Key::Tab,
+        KeyCode::Backspace => Key::Backspace,
+        KeyCode::Delete => Key::Delete,
+        KeyCode::Left => Key::Left,
+        KeyCode::Right => Key::Right,
+        KeyCode::Up => Key::Up,
+        KeyCode::Down => Key::Down,
+        KeyCode::Home => Key::Home,
+        KeyCode::End => Key::End,
+        KeyCode::Esc => Key::Escape,
+        _ => Key::Other,
+    }
 }
 
-#[cfg(any(unix, windows))]
 struct RawMode {
-    original: libc::termios,
+    enabled: bool,
 }
 
-#[cfg(any(unix, windows))]
 impl RawMode {
     fn enable() -> Result<Self> {
-        let fd = libc::STDIN_FILENO;
-        let mut original = std::mem::MaybeUninit::<libc::termios>::uninit();
-
-        unsafe {
-            if libc::tcgetattr(fd, original.as_mut_ptr()) != 0 {
-                bail!("failed to read terminal mode");
-            }
-            let original = original.assume_init();
-            let mut raw = original;
-            raw.c_lflag &= !(libc::ICANON | libc::ECHO);
-            raw.c_iflag &= !(libc::IXON | libc::ICRNL);
-            raw.c_cc[libc::VMIN] = 0;
-            raw.c_cc[libc::VTIME] = 1;
-
-            if libc::tcsetattr(fd, libc::TCSANOW, &raw) != 0 {
-                bail!("failed to enter raw terminal mode");
-            }
-
-            Ok(Self { original })
-        }
+        crossterm::terminal::enable_raw_mode()?;
+        Ok(Self { enabled: true })
     }
 }
 
-#[cfg(any(unix, windows))]
 impl Drop for RawMode {
     fn drop(&mut self) {
-        unsafe {
-            libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &self.original);
+        if self.enabled {
+            let _ = crossterm::terminal::disable_raw_mode();
         }
     }
 }
@@ -1072,6 +1023,74 @@ mod tests {
         assert_eq!(matches.len(), 2);
         assert_eq!(matches[0].value, "/status");
         assert_eq!(matches[1].value, "/swap");
+    }
+
+    #[test]
+    fn empty_input_matches_first_prompt_suggestion() {
+        let chrome = ComposerChrome {
+            active_commands: Vec::new(),
+            help_rows: Vec::new(),
+            status_rows: Vec::new(),
+            prompt_suggestions: vec![
+                "Write tests for @filename".to_string(),
+                "Review this repo".to_string(),
+            ],
+        };
+
+        let suggestion = matching_prompt_suggestion(&[], Some(&chrome));
+
+        assert_eq!(suggestion, Some("Write tests for @filename"));
+    }
+
+    #[test]
+    fn prompt_suggestion_matches_typed_prefix() {
+        let chrome = ComposerChrome {
+            active_commands: Vec::new(),
+            help_rows: Vec::new(),
+            status_rows: Vec::new(),
+            prompt_suggestions: vec![
+                "Build an Omniston v1beta8 quote flow".to_string(),
+                "Review this repo".to_string(),
+            ],
+        };
+        let input = "build an".chars().collect::<Vec<_>>();
+
+        let suggestion = matching_prompt_suggestion(&input, Some(&chrome));
+
+        assert_eq!(suggestion, Some("Build an Omniston v1beta8 quote flow"));
+    }
+
+    #[test]
+    fn prompt_suggestion_ignores_slash_commands() {
+        let chrome = ComposerChrome {
+            active_commands: Vec::new(),
+            help_rows: Vec::new(),
+            status_rows: Vec::new(),
+            prompt_suggestions: vec!["Review this repo".to_string()],
+        };
+        let input = "/r".chars().collect::<Vec<_>>();
+
+        let suggestion = matching_prompt_suggestion(&input, Some(&chrome));
+
+        assert_eq!(suggestion, None);
+    }
+
+    #[test]
+    fn key_mapping_is_platform_neutral_for_arrows() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let key = key_from_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+
+        assert_eq!(key, Key::Up);
+    }
+
+    #[test]
+    fn key_mapping_keeps_control_shortcuts_consistent() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let key = key_from_event(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+
+        assert_eq!(key, Key::DeletePreviousWord);
     }
 
     #[test]

@@ -9,7 +9,6 @@ use crate::tool_protocol;
 use crate::tools::{ToolObservation, ToolStatus};
 use anyhow::{Context, Result};
 use std::io::{self, Write};
-use std::process::Command;
 use std::time::Instant;
 
 const MAX_MODEL_TOOL_STEPS: usize = 4;
@@ -432,26 +431,18 @@ fn print_swap_helper(terminal: &Terminal, args: &str) {
     }
 
     println!("{}", terminal.accent("Omniston v1beta8 integration"));
-    println!("  • Target the STON.fi and Mira tracks with one flow: RFQ -> Quote -> settlement -> tracking.");
-    println!("  • Use Omniston SDK v0.8+ or package namespace stonfi.omni.v1beta8.");
-    println!(
-        "  • Build quote requests with inputAsset, outputAsset, amount, and settlementParams."
-    );
-    println!("  • Chain IDs: ton=50, base=3, bnb=4, ethereum=5, polygon=6.");
-    println!("  • Keep asset and wallet ChainAddress values on the same source/destination chain.");
-    println!("  • Branch on quote.settlementData?.$case before building transactions.");
-    println!("  • Swap settlement: build TON messages with tonBuildSwap, then sign through the user's wallet.");
-    println!("  • Order settlement: build TON escrow transfer or EVM order payload, then register/track the order.");
-    println!(
-        "  • Track sent swaps with swapTrack using quoteId, traderAddress, and outgoingTxQuery."
-    );
-    println!(
-        "  • Track order flows with orderTrack; disclose HTLC secrets only at the required phase."
-    );
+    println!("  • Use the STON.fi Omniston SDKs when possible; v1beta8 is the current API model for custom flows.");
+    println!("  • Build one RFQ flow for TON and cross-chain swaps: request quote, accept quote, settle, then track.");
+    println!("  • Model source and destination explicitly with v1beta8 chain IDs; keep asset and wallet ChainAddress values on matching chains.");
+    println!("  • Request quotes with input asset, output asset, amount, and settlementParams.");
+    println!("  • Treat quote settlement data as the branch point: swap settlement builds a wallet transaction, order settlement creates or registers an order.");
+    println!("  • For TON swap settlement, build the recommended TON messages and ask the user's wallet to sign.");
+    println!("  • For cross-chain order settlement, preserve HTLC deadlines, exclusivity windows, and secret-disclosure timing exactly.");
+    println!("  • Track submitted trades by quote ID, trader address, and the outgoing transaction query/hash until a terminal state.");
     println!();
     println!("{}", terminal.accent("Mira handoff"));
     println!(
-        "  • Send @mira a concise intent: `Quote, explain, and risk-check this Omniston v1beta8 route: <input asset/amount/source chain> to <output asset/destination chain>. Do not execute without explicit wallet confirmation.`"
+        "  • Send Mira a concise intent: `Quote, explain, and risk-check this Omniston v1beta8 route: <input asset/amount/source chain> to <output asset/destination chain>. Do not execute without explicit wallet confirmation.`"
     );
 }
 
@@ -596,16 +587,7 @@ fn prompt(
     account: &AccountSummary,
     session: &Session,
 ) -> (String, usize, input::ComposerChrome) {
-    let project = project_name(session.cwd());
-    let branch = git_branch(session.cwd());
-    let left_hint = match branch {
-        Some(branch) => format!("{} ({})", terminal.muted(&project), terminal.warn(&branch)),
-        None => terminal.muted(&project),
-    };
     let chrome = input::ComposerChrome {
-        left_hint,
-        right_hint: "• /help for commands".to_string(),
-        picker_hint: String::new(),
         active_commands: active_commands(),
         help_rows: command_help_rows(),
         status_rows: status_rows(account, session),
@@ -675,27 +657,6 @@ fn active_commands() -> Vec<String> {
     commands
 }
 
-fn project_name(path: &std::path::Path) -> String {
-    path.file_name()
-        .and_then(|value| value.to_str())
-        .filter(|value| !value.is_empty())
-        .unwrap_or("/")
-        .to_string()
-}
-
-fn git_branch(cwd: &std::path::Path) -> Option<String> {
-    let output = Command::new("git")
-        .args(["branch", "--show-current"])
-        .current_dir(cwd)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    (!branch.is_empty()).then_some(branch)
-}
-
 fn print_intro(terminal: &Terminal, model: &str, subscription: &str, cwd: &str) {
     println!();
     let logo = terminal.logo_lines();
@@ -723,6 +684,7 @@ fn print_intro(terminal: &Terminal, model: &str, subscription: &str, cwd: &str) 
             text_line
         );
     }
+    println!();
     println!();
 }
 

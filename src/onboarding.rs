@@ -2,7 +2,9 @@ use crate::auth;
 use crate::config::Config;
 use crate::terminal::{theme_label, Terminal, THEME_CHOICES};
 use anyhow::{bail, Context, Result};
-use std::io::{self, IsTerminal, Read, Write};
+#[cfg(unix)]
+use std::io::Read;
+use std::io::{self, IsTerminal, Write};
 use std::process;
 
 pub fn should_run(config: &Config) -> bool {
@@ -339,6 +341,7 @@ where
 
     #[cfg(not(unix))]
     {
+        let _ = (terminal, title, hint, style, &preview);
         read_choice(
             &format!("Enter 1-{}", choices.len()),
             choices.len(),
