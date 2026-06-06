@@ -404,7 +404,7 @@ fn render_prompt(
     } else {
         input_text
     };
-    let line_width = terminal_width().unwrap_or(DEFAULT_COMPOSER_WIDTH);
+    let line_width = composer_draw_width(terminal_width().unwrap_or(DEFAULT_COMPOSER_WIDTH));
     let used_width = prompt_width + visible_chars(&display_input);
     let padding = line_width.saturating_sub(used_width);
 
@@ -453,7 +453,7 @@ fn render_prompt(
 }
 
 fn render_static_composer(prompt: &str, line: &str, _chrome: &ComposerChrome) -> Result<()> {
-    let line_width = terminal_width().unwrap_or(DEFAULT_COMPOSER_WIDTH);
+    let line_width = composer_draw_width(terminal_width().unwrap_or(DEFAULT_COMPOSER_WIDTH));
     let padding = line_width.saturating_sub(visible_chars(prompt) + line.chars().count());
     render_input_band(prompt, line, padding, line_width);
     io::stdout().flush()?;
@@ -485,6 +485,10 @@ fn render_input_line(prompt: &str, input_text: &str, padding: usize) {
         "{INPUT_BG}{prompt}{INPUT_BG}{input_text}{INPUT_BG}{}\x1b[0m\n",
         " ".repeat(padding)
     );
+}
+
+fn composer_draw_width(terminal_width: usize) -> usize {
+    terminal_width.saturating_sub(1).max(1)
 }
 
 fn placeholder_input(chrome: Option<&ComposerChrome>) -> String {
@@ -1091,6 +1095,12 @@ mod tests {
         let key = key_from_event(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
 
         assert_eq!(key, Key::DeletePreviousWord);
+    }
+
+    #[test]
+    fn composer_draw_width_avoids_terminal_wrap_column() {
+        assert_eq!(composer_draw_width(120), 119);
+        assert_eq!(composer_draw_width(1), 1);
     }
 
     #[test]
