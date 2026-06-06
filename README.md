@@ -50,7 +50,7 @@ codeus config set permission_mode read-only
 codeus config set sandbox_policy policy-only
 ```
 
-Running `codeus` with no arguments starts the interactive CLI. First launch shows the Codeus logo, lets users choose a named syntax-style terminal theme and coding font preference with arrow keys and a live preview, then signs in with a Quantum Club account through the hosted Codeus proxy. Users can skip sign-in and connect later with `/login` or `codeus login`.
+Running `codeus` with no arguments starts the interactive CLI. First launch shows the Codeus logo, lets users choose a named syntax-style terminal theme and coding font preference with a live preview, then signs in with a Quantum Club account.
 
 The default API base is:
 

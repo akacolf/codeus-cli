@@ -105,10 +105,6 @@ impl ThreadStore {
         &self.id
     }
 
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
     pub fn append_message(&self, message: &Message) -> Result<()> {
         self.append(&ThreadRecord::Message {
             role: message.role.clone(),

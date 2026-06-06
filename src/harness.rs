@@ -3,7 +3,7 @@ use crate::context::{self, ContextStats};
 use crate::thread_store::{StoredThread, ThreadStore};
 use crate::tools::ToolObservation;
 use anyhow::{Context, Result};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 const AUTO_COMPACT_BYTES: usize = 24 * 1024;
 const COMPACT_KEEP_MESSAGES: usize = 8;
@@ -59,16 +59,8 @@ impl Session {
         self.store.id()
     }
 
-    pub fn thread_path(&self) -> &Path {
-        self.store.path()
-    }
-
     pub fn cwd(&self) -> &PathBuf {
         &self.cwd
-    }
-
-    pub fn context_stats(&self) -> &ContextStats {
-        &self.context_stats
     }
 
     pub fn transcript_len(&self) -> usize {

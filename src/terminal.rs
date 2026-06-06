@@ -45,6 +45,10 @@ pub const THEME_CHOICES: &[ThemeChoice] = &[
         key: "ansi",
         label: "ANSI colors only",
     },
+    ThemeChoice {
+        key: "none",
+        label: "No theme (plain text)",
+    },
 ];
 
 pub const FONT_CHOICES: &[FontChoice] = &[
@@ -124,7 +128,10 @@ enum Palette {
 
 impl Terminal {
     pub fn detect_with_theme(theme: Option<&str>) -> Self {
-        let color = io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none();
+        let themes_disabled = matches!(theme, Some("none") | Some("off") | Some("disabled"));
+        let color = io::stdout().is_terminal()
+            && std::env::var_os("NO_COLOR").is_none()
+            && !themes_disabled;
         let palette = match theme.unwrap_or("auto") {
             "monokai-light" | "light" | "light-colorblind" => Palette::MonokaiLight,
             "github-dark" => Palette::GitHubDark,
@@ -205,6 +212,35 @@ impl Terminal {
         } else {
             value.to_string()
         }
+    }
+
+    pub fn art(&self, value: &str) -> String {
+        self.fg(value, Color::Rgb(245, 245, 245))
+    }
+
+    pub fn welcome_art_lines(&self) -> Vec<String> {
+        let mut lines = vec![
+            format!(
+                "{} {}",
+                self.title("Welcome to the Codeus CLI"),
+                self.muted(&format!("v{}", env!("CARGO_PKG_VERSION")))
+            ),
+            self.muted("................................................................"),
+            String::new(),
+        ];
+
+        for line in self.logo_lines() {
+            let enlarged = line
+                .chars()
+                .map(|character| character.to_string().repeat(2))
+                .collect::<String>();
+            lines.push(self.art(&format!("      {enlarged}")));
+            lines.push(self.art(&format!("      {enlarged}")));
+        }
+
+        lines.push(String::new());
+        lines.push(self.muted("................................................................"));
+        lines
     }
 
     pub fn selection(&self, value: &str) -> String {

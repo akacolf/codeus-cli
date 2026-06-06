@@ -391,7 +391,7 @@ async fn handle_command(
             Ok(CommandResult::Continue)
         }
         "/status" => {
-            print_status(terminal, client, session);
+            show_status(client, session)?;
             Ok(CommandResult::Continue)
         }
         "/threads" => {
@@ -580,7 +580,7 @@ async fn handle_command(
         }
         "/login" => {
             let no_browser = parts.any(|part| part == "--no-browser");
-            login_from_repl(client, terminal, no_browser).await?;
+            login_from_repl(client, terminal, session, no_browser).await?;
             Ok(CommandResult::Continue)
         }
         "/logout" => {
@@ -588,14 +588,25 @@ async fn handle_command(
             config.session_token = None;
             config.refresh_token = None;
             config.token_expires_at = None;
+            config.onboarded = Some(false);
             config.save()?;
             let current = client.config().clone();
+            let config = onboarding::run(
+                Some(current.api_base.clone()),
+                Some(current.model.clone()),
+                config,
+            )
+            .await?;
+            *terminal = Terminal::detect_with_theme(config.theme.as_deref());
             *client = CodeusClient::new(ClientConfig {
                 api_base: current.api_base,
                 model: current.model,
-                token: None,
+                token: config.session_token,
             })?;
-            println!("{}", terminal.success("Signed out."));
+            if client.config().token.is_some() {
+                clear_screen();
+                print_welcome(terminal, client, session).await;
+            }
             Ok(CommandResult::Continue)
         }
         "/model" => {
@@ -635,6 +646,10 @@ async fn handle_command(
 }
 
 async fn print_welcome(terminal: &Terminal, client: &CodeusClient, session: &Session) {
+    if client.config().token.is_none() {
+        print_signed_out_intro(terminal);
+        return;
+    }
     let subscription = subscription_label(client).await;
     print_intro(
         terminal,
@@ -642,6 +657,21 @@ async fn print_welcome(terminal: &Terminal, client: &CodeusClient, session: &Ses
         &subscription,
         &session.cwd().display().to_string(),
     );
+}
+
+fn print_signed_out_intro(terminal: &Terminal) {
+    println!();
+    println!();
+    for line in terminal.welcome_art_lines() {
+        println!("{line}");
+    }
+    println!();
+    println!("{}", terminal.title("Let's get you started."));
+    println!(
+        "{}",
+        terminal.muted("Choose a theme with /theme, or use /login when you are ready to connect.")
+    );
+    println!();
 }
 
 fn print_help(terminal: &Terminal) {
@@ -678,7 +708,7 @@ fn print_observation(terminal: &Terminal, observation: &ToolObservation) {
     );
 }
 
-fn print_status(terminal: &Terminal, client: &CodeusClient, session: &Session) {
+fn show_status(client: &CodeusClient, session: &Session) -> Result<()> {
     let stored = Config::load().unwrap_or_default();
     let theme = stored
         .theme
@@ -686,29 +716,41 @@ fn print_status(terminal: &Terminal, client: &CodeusClient, session: &Session) {
         .and_then(theme_label)
         .unwrap_or("Auto");
     let turns = session.transcript_len();
-    let context_stats = session.context_stats();
-    println!("{}", terminal.accent("Session"));
-    println!("  thread: {}", session.thread_id());
-    println!("  thread file: {}", session.thread_path().display());
-    println!("  model: {}", client.config().model);
-    println!("  auth: {}", auth_label(client));
-    println!("  api: {}", client.config().api_base);
-    println!("  cwd: {}", session.cwd().display());
-    println!("  theme: {theme}");
-    println!("  font: {}", font_label(stored.font.as_deref()));
-    println!("  messages: {turns}");
-    println!(
-        "  AGENTS.md files: {} ({} bytes)",
-        context_stats.agent_doc_count, context_stats.agent_doc_bytes
-    );
-    println!(
-        "  compacted summary: {}",
-        if session.summary().is_some() {
-            "yes"
-        } else {
-            "no"
-        }
-    );
+    let rows = vec![
+        input::StatusRow {
+            label: "Account".to_string(),
+            value: auth_label(client).to_string(),
+        },
+        input::StatusRow {
+            label: "Model".to_string(),
+            value: display_model(&client.config().model),
+        },
+        input::StatusRow {
+            label: "Project".to_string(),
+            value: session.cwd().display().to_string(),
+        },
+        input::StatusRow {
+            label: "Thread".to_string(),
+            value: format!("{} messages", turns),
+        },
+        input::StatusRow {
+            label: "Memory".to_string(),
+            value: if session.summary().is_some() {
+                "older context compacted".to_string()
+            } else {
+                "fresh context".to_string()
+            },
+        },
+        input::StatusRow {
+            label: "Theme".to_string(),
+            value: theme.to_string(),
+        },
+        input::StatusRow {
+            label: "Font".to_string(),
+            value: font_label(stored.font.as_deref()),
+        },
+    ];
+    input::show_status_view(&rows)
 }
 
 fn print_threads(terminal: &Terminal) -> Result<()> {
@@ -767,7 +809,8 @@ fn print_swap_helper(terminal: &Terminal, args: &str) {
 
 async fn login_from_repl(
     client: &mut CodeusClient,
-    terminal: &Terminal,
+    terminal: &mut Terminal,
+    session: &Session,
     no_browser: bool,
 ) -> Result<()> {
     let stored = Config::load()?;
@@ -782,12 +825,14 @@ async fn login_from_repl(
     .await
     {
         Ok(config) => {
+            *terminal = Terminal::detect_with_theme(config.theme.as_deref());
             *client = CodeusClient::new(ClientConfig {
                 api_base: current.api_base,
                 model: current.model,
                 token: config.session_token,
             })?;
-            println!("{}", terminal.success("Connected."));
+            clear_screen();
+            print_welcome(terminal, client, session).await;
         }
         Err(error) => {
             println!(
@@ -798,6 +843,10 @@ async fn login_from_repl(
     }
 
     Ok(())
+}
+
+fn clear_screen() {
+    print!("\x1b[2J\x1b[H");
 }
 
 fn auth_label(client: &CodeusClient) -> &'static str {
@@ -978,12 +1027,14 @@ fn print_output_panel(terminal: &Terminal, plain_title: &str, colored_title: &st
     const WIDTH: usize = 76;
     let title_width = plain_title.chars().count();
     let remaining = WIDTH.saturating_sub(title_width + 2);
+    println!();
     println!(
         "{} {} {}",
         terminal.accent("┌"),
         colored_title,
         terminal.accent(&format!("{}┐", "─".repeat(remaining)))
     );
+    print_panel_line(terminal, WIDTH, "");
 
     if output.is_empty() {
         print_panel_line(terminal, WIDTH, "");
@@ -1000,7 +1051,9 @@ fn print_output_panel(terminal: &Terminal, plain_title: &str, colored_title: &st
         }
     }
 
+    print_panel_line(terminal, WIDTH, "");
     println!("{}", terminal.accent(&format!("└{}┘", "─".repeat(WIDTH))));
+    println!();
 }
 
 fn print_panel_line(terminal: &Terminal, width: usize, value: &str) {

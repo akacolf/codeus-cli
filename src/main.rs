@@ -365,10 +365,6 @@ async fn login(args: LoginArgs) -> Result<()> {
     auth::login_with_browser(globals.api_base, globals.model, &stored, args.no_browser)
         .await
         .context("browser login could not start. Verify CODEUS_API_BASE points at https://api.quantumclub.sh/v1 or another host exposing the Codeus device-link API")?;
-    println!(
-        "Connected Codeus CLI to your QC account at {}",
-        config::config_path()?.display()
-    );
     Ok(())
 }
 
@@ -377,6 +373,7 @@ fn logout() -> Result<()> {
     config.session_token = None;
     config.refresh_token = None;
     config.token_expires_at = None;
+    config.onboarded = Some(false);
     config.save()?;
     println!("Removed stored session token.");
     Ok(())

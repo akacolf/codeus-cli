@@ -5,7 +5,7 @@ use anyhow::{bail, Context, Result};
 use std::io::{self, IsTerminal, Read, Write};
 
 pub fn should_run(config: &Config) -> bool {
-    !config.onboarded.unwrap_or(false) && io::stdin().is_terminal() && io::stdout().is_terminal()
+    config.session_token.is_none() && io::stdin().is_terminal() && io::stdout().is_terminal()
 }
 
 pub async fn run(
@@ -13,37 +13,18 @@ pub async fn run(
     model: Option<String>,
     mut config: Config,
 ) -> Result<Config> {
-    let mut terminal = Terminal::detect_with_theme(config.theme.as_deref());
+    choose_theme(&mut config)?;
+    choose_font(&mut config)?;
+    let terminal = Terminal::detect_with_theme(config.theme.as_deref());
 
-    print_brand_header(&terminal);
-    println!();
-    println!("Let's get started.");
-    println!();
-
-    choose_appearance(&mut config)?;
-    terminal = Terminal::detect_with_theme(config.theme.as_deref());
-
-    println!();
-    print_brand_header(&terminal);
-    println!();
-    println!(
-        "{}",
-        terminal.title("Codeus CLI uses your Quantum Club account through QC's hosted proxy.")
-    );
-    println!(
-        "{}",
-        terminal
-            .muted("Provider credentials stay server-side; this CLI stores only a Codeus session.")
-    );
-    println!();
-    let login_choices = ["Quantum Club account - browser sign in", "Skip for now"];
+    let login_choices = ["Sign in with Quantum Club"];
     let login_choice = select_index(
         &terminal,
-        "Select login method",
-        "Use arrow keys to switch, Enter to select.",
+        "Sign in to continue",
+        "Connect your Quantum Club account in the browser.",
         &login_choices,
         0,
-        SelectorStyle::Static,
+        SelectorStyle::Login,
         |_| String::new(),
     )?;
 
@@ -61,7 +42,7 @@ pub async fn run(
                         signed_in.font = config.font;
                     }
                     signed_in.save()?;
-                    println!("{}", terminal.success("Signed in."));
+                    clear_screen();
                     Ok(signed_in)
                 }
                 Err(error) => {
@@ -78,15 +59,6 @@ pub async fn run(
                     Ok(Config::load()?)
                 }
             }
-        }
-        2 => {
-            config.onboarded = Some(true);
-            config.save()?;
-            println!(
-                "{}",
-                terminal.muted("Skipping sign in. Use /login when you are ready.")
-            );
-            Ok(config)
         }
         _ => unreachable!("read_choice clamps the selected range"),
     }
@@ -109,7 +81,7 @@ pub fn choose_theme(config: &mut Config) -> Result<()> {
     let selected = select_index(
         &Terminal::detect_with_theme(Some(current)),
         "Choose the text style that looks best with your terminal",
-        "Use arrow keys to switch. Preview updates as you move.",
+        "To change this later, run /theme",
         &labels,
         current_index,
         SelectorStyle::Theme,
@@ -142,10 +114,10 @@ pub fn choose_font(config: &mut Config) -> Result<()> {
     let selected = select_index(
         &Terminal::detect_with_theme(config.theme.as_deref()),
         "Choose your coding font preference",
-        "Use arrow keys to switch. Codeus saves this for its theme section.",
+        "To change this later, run /font",
         &labels,
         current_index,
-        SelectorStyle::Static,
+        SelectorStyle::Font,
         |index| print_font_sample(FONT_CHOICES[index].label),
     )?;
 
@@ -167,16 +139,6 @@ pub fn choose_font(config: &mut Config) -> Result<()> {
         terminal.muted("Terminal apps control the actual font; Codeus stores the preference.")
     );
     Ok(())
-}
-
-fn print_brand_header(terminal: &Terminal) {
-    println!(
-        "{} {}",
-        terminal.title("Welcome to Codeus CLI"),
-        terminal.muted(env!("CARGO_PKG_VERSION"))
-    );
-    println!();
-    println!("{}", terminal.logo());
 }
 
 fn print_theme_sample(terminal: &Terminal) -> String {
@@ -242,8 +204,9 @@ fn read_custom_font(current: &str) -> Result<String> {
 
 #[derive(Debug, Clone, Copy)]
 enum SelectorStyle {
-    Static,
     Theme,
+    Font,
+    Login,
 }
 
 fn select_index<F>(
@@ -288,7 +251,7 @@ fn render_selector(
 ) -> String {
     let selected_terminal;
     let terminal = match style {
-        SelectorStyle::Static => terminal,
+        SelectorStyle::Font | SelectorStyle::Login => terminal,
         SelectorStyle::Theme => {
             selected_terminal = Terminal::detect_with_theme(Some(THEME_CHOICES[selected].key));
             &selected_terminal
@@ -296,8 +259,22 @@ fn render_selector(
     };
 
     let mut lines = Vec::new();
+    if matches!(
+        style,
+        SelectorStyle::Theme | SelectorStyle::Font | SelectorStyle::Login
+    ) {
+        lines.push(String::new());
+        lines.extend(terminal.welcome_art_lines());
+        lines.push(String::new());
+    }
+    if matches!(style, SelectorStyle::Theme | SelectorStyle::Font) {
+        lines.push("Let's get started.".to_string());
+        lines.push(String::new());
+    }
     lines.push(terminal.title(title));
-    lines.push(terminal.muted(hint));
+    if !hint.is_empty() {
+        lines.push(terminal.muted(hint));
+    }
     lines.push(String::new());
 
     for (index, choice) in choices.iter().enumerate() {
@@ -316,9 +293,21 @@ fn render_selector(
     if !preview.is_empty() {
         lines.push(String::new());
         lines.push(preview.to_string());
+        if matches!(style, SelectorStyle::Theme) {
+            let label =
+                theme_label(THEME_CHOICES[selected].key).unwrap_or(THEME_CHOICES[selected].label);
+            lines.push(terminal.muted(&format!("Syntax theme: {label} (ctrl+t to disable)")));
+        }
     }
 
     lines.join("\n")
+}
+
+fn clear_screen() {
+    if io::stdout().is_terminal() {
+        print!("\x1b[2J\x1b[H");
+        let _ = io::stdout().flush();
+    }
 }
 
 fn interactive_select<F>(
@@ -338,6 +327,7 @@ where
         let _raw = RawMode::enable()?;
         let mut selected = default;
         let mut needs_render = true;
+        clear_screen();
         print!("\x1b7");
         io::stdout().flush()?;
 
@@ -368,6 +358,18 @@ where
                     selected = (selected + 1) % choices.len();
                     needs_render = true;
                 }
+                Key::ToggleTheme if matches!(style, SelectorStyle::Theme) => {
+                    let disabled = THEME_CHOICES
+                        .iter()
+                        .position(|choice| choice.key == "none")
+                        .unwrap_or(choices.len() - 1);
+                    selected = if selected == disabled {
+                        default.min(choices.len() - 1)
+                    } else {
+                        disabled
+                    };
+                    needs_render = true;
+                }
                 Key::Enter => {
                     println!();
                     return Ok(selected);
@@ -388,7 +390,7 @@ where
                     println!();
                     bail!("selection cancelled");
                 }
-                Key::Other => {}
+                Key::ToggleTheme | Key::Other => {}
             }
         }
     }
@@ -414,6 +416,7 @@ enum Key {
     Escape,
     Interrupt,
     Tab,
+    ToggleTheme,
     Digit(usize),
     Other,
 }
@@ -427,6 +430,7 @@ fn read_key() -> Result<Key> {
         b'\n' | b'\r' => Ok(Key::Enter),
         b'\t' => Ok(Key::Tab),
         0x03 => Ok(Key::Interrupt),
+        0x14 => Ok(Key::ToggleTheme),
         b'1'..=b'9' => Ok(Key::Digit((byte - b'0') as usize)),
         b'j' | b'J' => Ok(Key::Down),
         b'k' | b'K' => Ok(Key::Up),

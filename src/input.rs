@@ -4,7 +4,8 @@ use std::io::{self, IsTerminal, Read, Write};
 const DEFAULT_COMPOSER_WIDTH: usize = 120;
 const COMMAND_COLUMN_WIDTH: usize = 18;
 const MAX_MENU_ROWS: usize = 5;
-const FOOTER_RIGHT_MARGIN: usize = 6;
+const FOOTER_RIGHT_MARGIN: usize = 2;
+const COMPOSER_SAFE_AREA_LINES: usize = 2;
 const ACTIVE_COLOR: &str = "\x1b[1m\x1b[38;2;0;168;204m";
 
 #[derive(Debug, Clone, Copy)]
@@ -24,6 +25,11 @@ pub struct ComposerChrome {
 pub struct HelpRow {
     pub command: String,
     pub detail: String,
+}
+
+pub struct StatusRow {
+    pub label: String,
+    pub value: String,
 }
 
 pub enum PromptOutcome {
@@ -106,7 +112,7 @@ fn read_interactive_line(
                     let line = matches[selected].value.to_string();
                     if chrome.is_some_and(|chrome| is_help_command(&line, chrome)) {
                         if let Some(chrome) = chrome {
-                            show_help_view(chrome)?;
+                            show_help_view_and_restore_composer(chrome)?;
                         }
                         input.clear();
                         cursor = 0;
@@ -139,7 +145,7 @@ fn read_interactive_line(
                 let line = input.iter().collect::<String>().trim().to_string();
                 if chrome.is_some_and(|chrome| is_help_command(&line, chrome)) {
                     if let Some(chrome) = chrome {
-                        show_help_view(chrome)?;
+                        show_help_view_and_restore_composer(chrome)?;
                     }
                     input.clear();
                     cursor = 0;
@@ -349,9 +355,12 @@ fn render_prompt(
         println!();
         print!("  {}", menu_row(suggestion, selected));
     }
+    for _ in 0..COMPOSER_SAFE_AREA_LINES {
+        println!();
+    }
 
     if chrome.is_some() || menu_lines > 0 {
-        let up_lines = menu_lines + footer_lines;
+        let up_lines = menu_lines + footer_lines + COMPOSER_SAFE_AREA_LINES;
         if up_lines > 0 {
             print!("\x1b[{up_lines}A");
         }
@@ -402,12 +411,24 @@ fn render_footer(width: usize, chrome: &ComposerChrome, picker_active: bool) {
     );
 }
 
+fn show_help_view_and_restore_composer(chrome: &ComposerChrome) -> Result<()> {
+    print!("\x1b8\x1b[J");
+    io::stdout().flush()?;
+
+    let result = show_help_view(chrome);
+
+    print!("\x1b7");
+    io::stdout().flush()?;
+    result
+}
+
 fn show_help_view(chrome: &ComposerChrome) -> Result<()> {
     use crossterm::execute;
     use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
     use ratatui::backend::CrosstermBackend;
     use ratatui::Terminal;
 
+    let _raw = RawMode::enable()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let result = (|| -> Result<()> {
@@ -419,6 +440,36 @@ fn show_help_view(chrome: &ComposerChrome) -> Result<()> {
             terminal.draw(|frame| draw_help_view(frame, chrome))?;
             match read_key()? {
                 Key::Escape | Key::Interrupt => break,
+                _ => {}
+            }
+        }
+
+        Ok(())
+    })();
+
+    let mut stdout = io::stdout();
+    execute!(stdout, LeaveAlternateScreen)?;
+    result
+}
+
+pub fn show_status_view(rows: &[StatusRow]) -> Result<()> {
+    use crossterm::execute;
+    use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
+    use ratatui::backend::CrosstermBackend;
+    use ratatui::Terminal;
+
+    let _raw = RawMode::enable()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let result = (|| -> Result<()> {
+        let backend = CrosstermBackend::new(io::stdout());
+        let mut terminal = Terminal::new(backend)?;
+        terminal.clear()?;
+
+        loop {
+            terminal.draw(|frame| draw_status_view(frame, rows))?;
+            match read_key()? {
+                Key::Escape | Key::Interrupt | Key::Enter => break,
                 _ => {}
             }
         }
@@ -473,6 +524,66 @@ fn draw_help_view(frame: &mut ratatui::Frame<'_>, chrome: &ComposerChrome) {
         .collect::<Vec<_>>();
     let list = Paragraph::new(lines).style(Style::default().fg(Color::Gray));
     frame.render_widget(list, rows[2]);
+}
+
+fn draw_status_view(frame: &mut ratatui::Frame<'_>, rows: &[StatusRow]) {
+    use ratatui::layout::{Constraint, Direction, Layout};
+    use ratatui::style::{Color, Modifier, Style};
+    use ratatui::text::{Line, Span};
+    use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+
+    let area = frame.area();
+    let rows_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .margin(2)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(4),
+        ])
+        .split(area);
+
+    let title = Paragraph::new(Line::from(vec![
+        Span::styled(
+            "Codeus status",
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("  Esc to go back", Style::default().fg(Color::DarkGray)),
+    ]));
+    frame.render_widget(title, rows_layout[0]);
+
+    let summary = Paragraph::new("Session details that matter while you are building.")
+        .style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(summary, rows_layout[1]);
+
+    let label_width = rows
+        .iter()
+        .map(|row| row.label.chars().count())
+        .max()
+        .unwrap_or(0)
+        + 2;
+    let lines = rows
+        .iter()
+        .map(|row| {
+            Line::from(vec![
+                Span::styled(
+                    format!("{:<label_width$}", row.label),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(&row.value, Style::default().fg(Color::Gray)),
+            ])
+        })
+        .collect::<Vec<_>>();
+    let panel = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::TOP | Borders::BOTTOM)
+                .border_style(Style::default().fg(Color::DarkGray)),
+        )
+        .wrap(Wrap { trim: true });
+    frame.render_widget(panel, rows_layout[2]);
 }
 
 fn visible_menu_rows<'a>(
