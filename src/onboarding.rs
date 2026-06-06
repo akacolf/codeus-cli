@@ -178,6 +178,7 @@ where
     interactive_select(terminal, title, hint, choices, default, style, preview)
 }
 
+#[cfg(unix)]
 fn render_selector(
     terminal: &Terminal,
     title: &str,
@@ -352,6 +353,7 @@ where
 }
 
 #[derive(Debug, Clone, Copy)]
+#[cfg(unix)]
 enum Key {
     Up,
     Down,

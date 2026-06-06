@@ -65,16 +65,18 @@ pub async fn run(client: CodeusClient) -> Result<()> {
     let mut terminal = Terminal::detect_with_theme(stored.theme.as_deref());
     let mut session = Session::new()?;
     let mut account = account_summary(&client).await;
+    let mut input_history = input::InputHistory::default();
 
     print_welcome(&terminal, &client, &session, &account).await;
 
     loop {
         let (prompt, prompt_width, chrome) = prompt(&terminal, &account, &session);
-        let input = match input::read_line_with_chrome(
+        let input = match input::read_line_with_chrome_and_history(
             &prompt,
             prompt_width,
             COMMAND_SUGGESTIONS,
             &chrome,
+            &mut input_history,
         )? {
             PromptOutcome::Line(input) => input,
             PromptOutcome::Eof | PromptOutcome::Interrupted => break,

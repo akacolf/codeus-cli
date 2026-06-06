@@ -41,13 +41,75 @@ pub enum PromptOutcome {
     Interrupted,
 }
 
-pub fn read_line_with_chrome(
+#[derive(Default)]
+pub struct InputHistory {
+    entries: Vec<String>,
+    cursor: Option<usize>,
+    draft: Option<String>,
+}
+
+impl InputHistory {
+    pub fn record(&mut self, line: &str) {
+        if line.trim().is_empty() {
+            return;
+        }
+        if self.entries.last().is_some_and(|entry| entry == line) {
+            self.reset_navigation();
+            return;
+        }
+        self.entries.push(line.to_string());
+        self.reset_navigation();
+    }
+
+    fn previous(&mut self, current: &[char]) -> Option<Vec<char>> {
+        if self.entries.is_empty() {
+            return None;
+        }
+
+        let next = match self.cursor {
+            Some(0) => 0,
+            Some(index) => index - 1,
+            None => {
+                self.draft = Some(current.iter().collect());
+                self.entries.len() - 1
+            }
+        };
+        self.cursor = Some(next);
+        Some(self.entries[next].chars().collect())
+    }
+
+    fn next(&mut self) -> Option<Vec<char>> {
+        let cursor = self.cursor?;
+        if cursor + 1 < self.entries.len() {
+            let next = cursor + 1;
+            self.cursor = Some(next);
+            return Some(self.entries[next].chars().collect());
+        }
+
+        self.cursor = None;
+        Some(self.draft.take().unwrap_or_default().chars().collect())
+    }
+
+    fn reset_navigation(&mut self) {
+        self.cursor = None;
+        self.draft = None;
+    }
+}
+
+pub fn read_line_with_chrome_and_history(
     prompt: &str,
     prompt_width: usize,
     suggestions: &[Suggestion<'_>],
     chrome: &ComposerChrome,
+    history: &mut InputHistory,
 ) -> Result<PromptOutcome> {
-    read_line(prompt, prompt_width, suggestions, Some(chrome))
+    read_line(
+        prompt,
+        prompt_width,
+        suggestions,
+        Some(chrome),
+        Some(history),
+    )
 }
 
 fn read_line(
@@ -55,6 +117,7 @@ fn read_line(
     prompt_width: usize,
     suggestions: &[Suggestion<'_>],
     chrome: Option<&ComposerChrome>,
+    mut history: Option<&mut InputHistory>,
 ) -> Result<PromptOutcome> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         print!("{prompt}");
@@ -65,10 +128,14 @@ fn read_line(
             return Ok(PromptOutcome::Eof);
         }
 
-        return Ok(PromptOutcome::Line(input.trim().to_string()));
+        let line = input.trim().to_string();
+        if let Some(history) = history.as_mut() {
+            history.record(&line);
+        }
+        return Ok(PromptOutcome::Line(line));
     }
 
-    read_interactive_line(prompt, prompt_width, suggestions, chrome)
+    read_interactive_line(prompt, prompt_width, suggestions, chrome, history)
 }
 
 #[cfg(any(unix, windows))]
@@ -77,6 +144,7 @@ fn read_interactive_line(
     prompt_width: usize,
     suggestions: &[Suggestion<'_>],
     chrome: Option<&ComposerChrome>,
+    mut history: Option<&mut InputHistory>,
 ) -> Result<PromptOutcome> {
     let _raw = RawMode::enable()?;
     let mut input = Vec::new();
@@ -165,9 +233,12 @@ fn read_interactive_line(
                     if let Some(chrome) = chrome {
                         render_static_composer(prompt, &line, chrome)?;
                     } else {
-                        print!("{prompt}{line}\x1b[0m\n");
+                        print!("{prompt}{line}\x1b[0m\r\n");
                     }
                     io::stdout().flush()?;
+                    if let Some(history) = history.as_mut() {
+                        history.record(&line);
+                    }
                     return Ok(PromptOutcome::Line(line));
                 }
 
@@ -224,9 +295,12 @@ fn read_interactive_line(
                 if let Some(chrome) = chrome {
                     render_static_composer(prompt, &line, chrome)?;
                 } else {
-                    print!("{prompt}{line}\x1b[0m\n");
+                    print!("{prompt}{line}\x1b[0m\r\n");
                 }
                 io::stdout().flush()?;
+                if let Some(history) = history.as_mut() {
+                    history.record(&line);
+                }
                 return Ok(PromptOutcome::Line(line));
             }
             Key::Interrupt => {
@@ -234,14 +308,14 @@ fn read_interactive_line(
                 if let Some(chrome) = chrome {
                     render_static_composer(prompt, "", chrome)?;
                 } else {
-                    print!("{prompt}\x1b[0m\n");
+                    print!("{prompt}\x1b[0m\r\n");
                 }
                 io::stdout().flush()?;
                 return Ok(PromptOutcome::Interrupted);
             }
             Key::EndOfInput if input.is_empty() => {
                 clear_composer_area(chrome.is_some());
-                println!();
+                print!("\r\n");
                 io::stdout().flush()?;
                 return Ok(PromptOutcome::Eof);
             }
@@ -250,6 +324,9 @@ fn read_interactive_line(
                 if cursor > 0 {
                     cursor -= 1;
                     input.remove(cursor);
+                    if let Some(history) = history.as_mut() {
+                        history.reset_navigation();
+                    }
                     selected = 0;
                     menu_start = 0;
                     menu_hidden = false;
@@ -258,6 +335,9 @@ fn read_interactive_line(
             Key::Delete => {
                 if cursor < input.len() {
                     input.remove(cursor);
+                    if let Some(history) = history.as_mut() {
+                        history.reset_navigation();
+                    }
                     selected = 0;
                     menu_start = 0;
                     menu_hidden = false;
@@ -265,6 +345,9 @@ fn read_interactive_line(
             }
             Key::DeleteToEnd => {
                 input.truncate(cursor);
+                if let Some(history) = history.as_mut() {
+                    history.reset_navigation();
+                }
                 selected = 0;
                 menu_start = 0;
                 menu_hidden = false;
@@ -272,12 +355,18 @@ fn read_interactive_line(
             Key::DeleteLine => {
                 input.clear();
                 cursor = 0;
+                if let Some(history) = history.as_mut() {
+                    history.reset_navigation();
+                }
                 selected = 0;
                 menu_start = 0;
                 menu_hidden = false;
             }
             Key::DeletePreviousWord => {
                 delete_previous_word(&mut input, &mut cursor);
+                if let Some(history) = history.as_mut() {
+                    history.reset_navigation();
+                }
                 selected = 0;
                 menu_start = 0;
                 menu_hidden = false;
@@ -312,6 +401,9 @@ fn read_interactive_line(
             Key::Tab if !matches.is_empty() => {
                 input = autocomplete_command(matches[selected]);
                 cursor = input.len();
+                if let Some(history) = history.as_mut() {
+                    history.reset_navigation();
+                }
                 selected = 0;
                 menu_start = 0;
                 menu_hidden = true;
@@ -320,6 +412,9 @@ fn read_interactive_line(
                 if let Some(suggestion) = matching_prompt_suggestion(&input, chrome) {
                     input = suggestion.chars().collect();
                     cursor = input.len();
+                    if let Some(history) = history.as_mut() {
+                        history.reset_navigation();
+                    }
                     selected = 0;
                     menu_start = 0;
                     menu_hidden = true;
@@ -329,12 +424,18 @@ fn read_interactive_line(
                 if value == '/' && !matches.is_empty() && command_picker_input(&input) {
                     input = autocomplete_command(matches[selected]);
                     cursor = input.len();
+                    if let Some(history) = history.as_mut() {
+                        history.reset_navigation();
+                    }
                     selected = 0;
                     menu_start = 0;
                     menu_hidden = true;
                 } else {
                     input.insert(cursor, value);
                     cursor += 1;
+                    if let Some(history) = history.as_mut() {
+                        history.reset_navigation();
+                    }
                     selected = 0;
                     menu_start = 0;
                     menu_hidden = false;
@@ -345,7 +446,28 @@ fn read_interactive_line(
                 selected = 0;
                 menu_start = 0;
             }
-            Key::Up | Key::Down | Key::Other => {}
+            Key::Up => {
+                if let Some(next) = history
+                    .as_mut()
+                    .and_then(|history| history.previous(&input))
+                {
+                    input = next;
+                    cursor = input.len();
+                    selected = 0;
+                    menu_start = 0;
+                    menu_hidden = true;
+                }
+            }
+            Key::Down => {
+                if let Some(next) = history.as_mut().and_then(|history| history.next()) {
+                    input = next;
+                    cursor = input.len();
+                    selected = 0;
+                    menu_start = 0;
+                    menu_hidden = true;
+                }
+            }
+            Key::Other => {}
         }
 
         render_prompt(
@@ -369,6 +491,7 @@ fn read_interactive_line(
     _prompt_width: usize,
     _suggestions: &[Suggestion<'_>],
     _chrome: Option<&ComposerChrome>,
+    mut history: Option<&mut InputHistory>,
 ) -> Result<PromptOutcome> {
     print!("{prompt}");
     io::stdout().flush()?;
@@ -378,7 +501,11 @@ fn read_interactive_line(
         return Ok(PromptOutcome::Eof);
     }
 
-    Ok(PromptOutcome::Line(input.trim().to_string()))
+    let line = input.trim().to_string();
+    if let Some(history) = history.as_mut() {
+        history.record(&line);
+    }
+    Ok(PromptOutcome::Line(line))
 }
 
 fn render_prompt(
@@ -423,22 +550,34 @@ fn render_prompt(
     let visible_matches = visible_menu_rows(&matches, selected, menu_start);
     let menu_lines = visible_matches.len();
     for (suggestion, selected) in visible_matches {
-        println!();
+        print!("\r\n");
         print!("  {}", menu_row(suggestion, selected));
     }
     for _ in 0..COMPOSER_SAFE_AREA_LINES {
-        println!();
+        print!("\r\n");
     }
 
+    // Reposition cursor on the input line.
+    //
+    // After rendering, the cursor has moved down from the band start:
+    //   input_lines  (band rows, each ending with \r\n)
+    //   + menu_lines  (autocomplete menu rows)
+    //   + SAFE_AREA   (blank rows below the menu)
+    //
+    // The input row sits at offset COMPOSER_INPUT_LINE_OFFSET from the
+    // band start, so we go up by:
+    //   total_rows_down − OFFSET
+    //
+    // When there is no band (input_lines == 0), saturating_sub yields 0,
+    // which correctly keeps the cursor on the inline prompt row.
     if chrome.is_some() || menu_lines > 0 {
-        let up_lines = menu_lines + input_lines + COMPOSER_SAFE_AREA_LINES;
+        let up_lines = menu_lines
+            + COMPOSER_SAFE_AREA_LINES
+            + input_lines.saturating_sub(COMPOSER_INPUT_LINE_OFFSET);
         if up_lines > 0 {
             print!("\x1b[{up_lines}A");
         }
         print!("\r");
-        if chrome.is_some() {
-            print!("\x1b[{COMPOSER_INPUT_LINE_OFFSET}B");
-        }
         let column =
             (prompt_width + input.iter().take(cursor).count()).min(line_width.saturating_sub(1));
         print!("\x1b[{column}C");
@@ -460,6 +599,9 @@ fn render_static_composer(prompt: &str, line: &str, _chrome: &ComposerChrome) ->
     Ok(())
 }
 
+/// Move from the input row back to the top of the band, then erase
+/// everything below.  The input row is `COMPOSER_INPUT_LINE_OFFSET`
+/// lines below the band top.
 fn clear_composer_area(has_chrome: bool) {
     if has_chrome {
         print!("\r\x1b[{COMPOSER_INPUT_LINE_OFFSET}A\x1b[J");
@@ -475,25 +617,29 @@ fn render_input_band(prompt: &str, input_text: &str, width: usize) {
 fn input_band(prompt: &str, input_text: &str, width: usize) -> String {
     format!(
         "{}{}{}",
-        blank_input_line(width),
+        blank_input_line(),
         input_line(prompt, input_text, width),
-        blank_input_line(width)
+        blank_input_line()
     )
 }
 
-fn blank_input_line(width: usize) -> String {
-    format!("{INPUT_BG}{}\x1b[0m\n", " ".repeat(width))
+/// Render a full-width blank line with the input background color.
+/// Uses `\x1b[K` (erase-to-end-of-line) so the background extends to
+/// the terminal edge without manual space-padding or wrap-column math.
+fn blank_input_line() -> String {
+    format!("{INPUT_BG}\x1b[K\x1b[0m\r\n")
 }
 
+/// Render the input line with prompt and text, filling the rest of the
+/// line with `\x1b[K`.  The `width` parameter is only used to truncate
+/// text that would exceed the terminal width; the visual fill is
+/// handled by the erase-to-end-of-line escape.
 fn input_line(prompt: &str, input_text: &str, width: usize) -> String {
     let prompt = paint_on_input_bg(prompt);
     let input_text = truncate_visible(input_text, width.saturating_sub(visible_chars(&prompt)));
     let input_text = paint_on_input_bg(&input_text);
-    let used_width = visible_chars(&prompt) + visible_chars(&input_text);
-    let padding = width.saturating_sub(used_width);
     format!(
-        "{INPUT_BG}{prompt}{INPUT_BG}{input_text}{INPUT_BG}{}\x1b[0m\n",
-        " ".repeat(padding)
+        "{INPUT_BG}{prompt}{INPUT_BG}{input_text}{INPUT_BG}\x1b[K\x1b[0m\r\n"
     )
 }
 
@@ -1144,20 +1290,61 @@ mod tests {
     }
 
     #[test]
+    fn input_history_walks_previous_and_restores_draft() {
+        let mut history = InputHistory::default();
+        history.record("first");
+        history.record("second");
+
+        let draft = "draft".chars().collect::<Vec<_>>();
+
+        assert_eq!(
+            history.previous(&draft),
+            Some("second".chars().collect::<Vec<_>>())
+        );
+        assert_eq!(
+            history.previous(&[]),
+            Some("first".chars().collect::<Vec<_>>())
+        );
+        assert_eq!(
+            history.previous(&[]),
+            Some("first".chars().collect::<Vec<_>>())
+        );
+        assert_eq!(history.next(), Some("second".chars().collect::<Vec<_>>()));
+        assert_eq!(history.next(), Some("draft".chars().collect::<Vec<_>>()));
+        assert_eq!(history.next(), None);
+    }
+
+    #[test]
+    fn input_history_skips_empty_and_adjacent_duplicates() {
+        let mut history = InputHistory::default();
+        history.record("");
+        history.record("same");
+        history.record("same");
+
+        assert_eq!(
+            history.previous(&[]),
+            Some("same".chars().collect::<Vec<_>>())
+        );
+        assert_eq!(history.next(), Some(Vec::new()));
+    }
+
+    #[test]
     fn composer_draw_width_avoids_terminal_wrap_column() {
         assert_eq!(composer_draw_width(120), 119);
         assert_eq!(composer_draw_width(1), 1);
     }
 
     #[test]
-    fn input_band_pads_every_line_without_erase_line() {
+    fn input_band_uses_erase_for_full_width_fill() {
         let band = input_band("> ", "hello", 16);
 
         assert_eq!(band.matches('\n').count(), COMPOSER_BAND_LINES);
-        assert!(!band.contains("\x1b[K"));
-        for line in band.lines() {
-            assert_eq!(visible_chars(line), 16);
-        }
+        // Each line uses \x1b[K to fill remaining width instead of
+        // manual space-padding, avoiding wrap-column arithmetic.
+        assert!(band.contains("\x1b[K"));
+        // The input line still renders prompt + text.
+        let content_line = band.lines().nth(1).unwrap();
+        assert!(content_line.contains("hello"));
     }
 
     #[test]
