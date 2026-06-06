@@ -413,7 +413,7 @@ fn render_prompt(
     }
 
     let input_lines = if chrome.is_some() {
-        render_input_band(prompt, &display_input, padding, line_width);
+        render_input_band(prompt, &display_input, line_width);
         COMPOSER_BAND_LINES
     } else {
         print!("{prompt}{display_input}{}\x1b[0m", " ".repeat(padding));
@@ -439,7 +439,8 @@ fn render_prompt(
         if chrome.is_some() {
             print!("\x1b[{COMPOSER_INPUT_LINE_OFFSET}B");
         }
-        let column = prompt_width + input.iter().take(cursor).count();
+        let column =
+            (prompt_width + input.iter().take(cursor).count()).min(line_width.saturating_sub(1));
         print!("\x1b[{column}C");
     } else {
         let back = padding + input.len().saturating_sub(cursor);
@@ -454,8 +455,7 @@ fn render_prompt(
 
 fn render_static_composer(prompt: &str, line: &str, _chrome: &ComposerChrome) -> Result<()> {
     let line_width = composer_draw_width(terminal_width().unwrap_or(DEFAULT_COMPOSER_WIDTH));
-    let padding = line_width.saturating_sub(visible_chars(prompt) + line.chars().count());
-    render_input_band(prompt, line, padding, line_width);
+    render_input_band(prompt, line, line_width);
     io::stdout().flush()?;
     Ok(())
 }
@@ -468,23 +468,33 @@ fn clear_composer_area(has_chrome: bool) {
     }
 }
 
-fn render_input_band(prompt: &str, input_text: &str, padding: usize, width: usize) {
-    render_blank_input_line(width);
-    render_input_line(prompt, input_text, padding);
-    render_blank_input_line(width);
+fn render_input_band(prompt: &str, input_text: &str, width: usize) {
+    print!("{}", input_band(prompt, input_text, width));
 }
 
-fn render_blank_input_line(width: usize) {
-    println!("{INPUT_BG}{}\x1b[0m", " ".repeat(width));
+fn input_band(prompt: &str, input_text: &str, width: usize) -> String {
+    format!(
+        "{}{}{}",
+        blank_input_line(width),
+        input_line(prompt, input_text, width),
+        blank_input_line(width)
+    )
 }
 
-fn render_input_line(prompt: &str, input_text: &str, padding: usize) {
+fn blank_input_line(width: usize) -> String {
+    format!("{INPUT_BG}{}\x1b[0m\n", " ".repeat(width))
+}
+
+fn input_line(prompt: &str, input_text: &str, width: usize) -> String {
     let prompt = paint_on_input_bg(prompt);
-    let input_text = paint_on_input_bg(input_text);
-    print!(
+    let input_text = truncate_visible(input_text, width.saturating_sub(visible_chars(&prompt)));
+    let input_text = paint_on_input_bg(&input_text);
+    let used_width = visible_chars(&prompt) + visible_chars(&input_text);
+    let padding = width.saturating_sub(used_width);
+    format!(
         "{INPUT_BG}{prompt}{INPUT_BG}{input_text}{INPUT_BG}{}\x1b[0m\n",
         " ".repeat(padding)
-    );
+    )
 }
 
 fn composer_draw_width(terminal_width: usize) -> usize {
@@ -722,6 +732,37 @@ fn visible_chars(value: &str) -> usize {
     count
 }
 
+fn truncate_visible(value: &str, max_width: usize) -> String {
+    let mut output = String::new();
+    let mut width = 0usize;
+    let mut saw_escape = false;
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' && chars.peek() == Some(&'[') {
+            saw_escape = true;
+            output.push(ch);
+            output.push(chars.next().expect("peeked escape bracket"));
+            for next in chars.by_ref() {
+                output.push(next);
+                if next.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else if width < max_width {
+            output.push(ch);
+            width += 1;
+        } else {
+            break;
+        }
+    }
+
+    if saw_escape && !output.ends_with("\x1b[0m") {
+        output.push_str("\x1b[0m");
+    }
+
+    output
+}
+
 fn terminal_width() -> Option<usize> {
     crossterm::terminal::size()
         .ok()
@@ -923,9 +964,14 @@ enum Key {
 }
 
 fn read_key() -> Result<Key> {
+    use crossterm::event::{Event, KeyEventKind};
+
     loop {
         let event = crossterm::event::read()?;
-        if let crossterm::event::Event::Key(event) = event {
+        if let Event::Key(event) = event {
+            if !matches!(event.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                continue;
+            }
             return Ok(key_from_event(event));
         }
     }
@@ -1101,6 +1147,39 @@ mod tests {
     fn composer_draw_width_avoids_terminal_wrap_column() {
         assert_eq!(composer_draw_width(120), 119);
         assert_eq!(composer_draw_width(1), 1);
+    }
+
+    #[test]
+    fn input_band_pads_every_line_without_erase_line() {
+        let band = input_band("> ", "hello", 16);
+
+        assert_eq!(band.matches('\n').count(), COMPOSER_BAND_LINES);
+        assert!(!band.contains("\x1b[K"));
+        for line in band.lines() {
+            assert_eq!(visible_chars(line), 16);
+        }
+    }
+
+    #[test]
+    fn input_band_truncates_long_visible_text_before_wrap_column() {
+        let band = input_band("> ", "hello world", 8);
+        let input_line = band.lines().nth(1).unwrap();
+
+        assert_eq!(visible_chars(input_line), 8);
+        assert!(input_line.contains("hello "));
+        assert!(!input_line.contains("world"));
+    }
+
+    #[test]
+    fn input_band_truncates_ansi_styled_text_by_visible_width() {
+        let band = input_band("> ", "\x1b[2mhello world\x1b[0m", 8);
+        let input_line = band.lines().nth(1).unwrap();
+
+        assert_eq!(visible_chars(input_line), 8);
+        assert!(input_line.contains("\x1b[2m"));
+        assert!(input_line.contains("\x1b[0m"));
+        assert!(input_line.contains("hello "));
+        assert!(!input_line.contains("world"));
     }
 
     #[test]

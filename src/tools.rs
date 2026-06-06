@@ -561,7 +561,12 @@ fn is_skipped_dir(path: &Path) -> bool {
 }
 
 fn display_relative_path(cwd: &Path, path: &Path) -> String {
-    path.strip_prefix(cwd).unwrap_or(path).display().to_string()
+    path.strip_prefix(cwd)
+        .unwrap_or(path)
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn plan_patch(cwd: &Path, operations: Vec<PatchOperation>) -> Result<Vec<PlannedPatch>> {
