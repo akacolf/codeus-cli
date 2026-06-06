@@ -139,16 +139,31 @@ impl Terminal {
     }
 
     pub fn logo(&self) -> String {
-        let raw = "              </>";
+        self.logo_lines()
+            .into_iter()
+            .map(|line| self.warn(&line))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 
-        self.accent(&raw)
+    pub fn logo_lines(&self) -> Vec<String> {
+        [
+            "██        ██    ██",
+            " ██      ██    ██ ",
+            "  ██    ██    ██  ",
+            " ██    ██      ██ ",
+            "██    ██        ██",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
     }
 
     pub fn composer_prompt(&self) -> String {
         if self.color {
-            "\x1b[48;2;55;55;55m\x1b[38;2;245;245;245m\u{203a}\x1b[38;2;238;238;238m".to_string()
+            "\x1b[38;2;245;245;245m>\x1b[0m ".to_string()
         } else {
-            "\u{203a}".to_string()
+            "> ".to_string()
         }
     }
 

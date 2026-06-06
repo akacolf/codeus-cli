@@ -39,6 +39,7 @@ codeus login
 codeus account
 codeus usage
 codeus doctor
+codeus harness
 codeus status --output-format json
 codeus state
 codeus update
@@ -73,6 +74,7 @@ https://api.quantumclub.sh/v1
 /git status|diff       Run safe git inspection commands
 /run <command>         Run an approved command prefix
 /approvals             Show approved command prefixes
+/harness               Show local agent-harness readiness
 /trace                 Show local telemetry status
 /theme                 Change the terminal theme and font
 /font                  Change the coding font preference
@@ -161,6 +163,19 @@ Set `CODEUS_TRACE=1` to write local JSONL telemetry events to:
 
 Trace events currently cover local tool observations and model turn latency. They are disabled by default.
 
+## Agent harness posture
+
+Run `codeus harness` to inspect the local harness foundation and the remaining gaps against the best ideas from modern terminal agents:
+
+```bash
+codeus harness
+codeus --output-format json harness
+```
+
+The report checks the Rust CLI core, hosted proxy default, workspace context loading, native model tool loop, command policy, permission mode, thread store, telemetry, and the deterministic mock proxy harness. It also maps the current repository to the security workflow popularized by Anthropic's reference harness: recon/threat-model, find, triage, report, and patch artifacts.
+
+This is intentionally a readiness report, not an autonomous vulnerability runner. The Anthropic reference pipeline executes target code behind gVisor/Docker isolation; Codeus CLI currently stays distribution-friendly and Rust-native, so target-code execution should wait until real OS/container sandboxing is wired in.
+
 ## Configuration
 
 Config is stored at:
@@ -229,6 +244,7 @@ Core inspection commands support machine-readable output:
 
 ```bash
 codeus --output-format json doctor
+codeus --output-format json harness
 codeus --output-format json status
 codeus --output-format json state
 codeus --output-format json config show

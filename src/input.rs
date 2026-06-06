@@ -3,11 +3,27 @@ use std::io::{self, IsTerminal, Read, Write};
 
 const DEFAULT_COMPOSER_WIDTH: usize = 120;
 const COMMAND_COLUMN_WIDTH: usize = 18;
+const MAX_MENU_ROWS: usize = 5;
+const FOOTER_RIGHT_MARGIN: usize = 6;
+const ACTIVE_COLOR: &str = "\x1b[1m\x1b[38;2;0;168;204m";
 
 #[derive(Debug, Clone, Copy)]
 pub struct Suggestion<'a> {
     pub value: &'a str,
     pub detail: &'a str,
+}
+
+pub struct ComposerChrome {
+    pub left_hint: String,
+    pub right_hint: String,
+    pub picker_hint: String,
+    pub active_commands: Vec<String>,
+    pub help_rows: Vec<HelpRow>,
+}
+
+pub struct HelpRow {
+    pub command: String,
+    pub detail: String,
 }
 
 pub enum PromptOutcome {
@@ -16,10 +32,20 @@ pub enum PromptOutcome {
     Interrupted,
 }
 
-pub fn read_line_with_suggestions(
+pub fn read_line_with_chrome(
     prompt: &str,
     prompt_width: usize,
     suggestions: &[Suggestion<'_>],
+    chrome: &ComposerChrome,
+) -> Result<PromptOutcome> {
+    read_line(prompt, prompt_width, suggestions, Some(chrome))
+}
+
+fn read_line(
+    prompt: &str,
+    prompt_width: usize,
+    suggestions: &[Suggestion<'_>],
+    chrome: Option<&ComposerChrome>,
 ) -> Result<PromptOutcome> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         print!("{prompt}");
@@ -33,7 +59,7 @@ pub fn read_line_with_suggestions(
         return Ok(PromptOutcome::Line(input.trim().to_string()));
     }
 
-    read_interactive_line(prompt, prompt_width, suggestions)
+    read_interactive_line(prompt, prompt_width, suggestions, chrome)
 }
 
 #[cfg(unix)]
@@ -41,30 +67,114 @@ fn read_interactive_line(
     prompt: &str,
     prompt_width: usize,
     suggestions: &[Suggestion<'_>],
+    chrome: Option<&ComposerChrome>,
 ) -> Result<PromptOutcome> {
     let _raw = RawMode::enable()?;
     let mut input = Vec::new();
     let mut cursor = 0usize;
     let mut selected = 0usize;
+    let mut menu_start = 0usize;
+    let mut menu_hidden = false;
 
     print!("\x1b7");
-    render_prompt(prompt, prompt_width, &input, cursor, suggestions, selected)?;
+    render_prompt(
+        prompt,
+        prompt_width,
+        &input,
+        cursor,
+        suggestions,
+        selected,
+        menu_start,
+        chrome,
+        menu_hidden,
+    )?;
 
     loop {
-        let matches = matching_suggestions(&input, suggestions);
+        let matches = if menu_hidden {
+            Vec::new()
+        } else {
+            matching_suggestions(&input, suggestions)
+        };
         if selected >= matches.len() {
             selected = matches.len().saturating_sub(1);
         }
+        clamp_menu_start(&mut menu_start, matches.len());
 
         match read_key()? {
             Key::Enter => {
+                if !matches.is_empty() && command_picker_input(&input) {
+                    let line = matches[selected].value.to_string();
+                    if chrome.is_some_and(|chrome| is_help_command(&line, chrome)) {
+                        if let Some(chrome) = chrome {
+                            show_help_view(chrome)?;
+                        }
+                        input.clear();
+                        cursor = 0;
+                        selected = 0;
+                        menu_start = 0;
+                        menu_hidden = false;
+                        render_prompt(
+                            prompt,
+                            prompt_width,
+                            &input,
+                            cursor,
+                            suggestions,
+                            selected,
+                            menu_start,
+                            chrome,
+                            menu_hidden,
+                        )?;
+                        continue;
+                    }
+                    print!("\x1b8\x1b[J");
+                    if let Some(chrome) = chrome {
+                        render_static_composer(prompt, &line, chrome)?;
+                    } else {
+                        print!("{prompt}{line}\x1b[0m\n");
+                    }
+                    io::stdout().flush()?;
+                    return Ok(PromptOutcome::Line(line));
+                }
+
                 let line = input.iter().collect::<String>().trim().to_string();
-                print!("\x1b8\x1b[J{prompt}{line}\x1b[0m\n");
+                if chrome.is_some_and(|chrome| is_help_command(&line, chrome)) {
+                    if let Some(chrome) = chrome {
+                        show_help_view(chrome)?;
+                    }
+                    input.clear();
+                    cursor = 0;
+                    selected = 0;
+                    menu_start = 0;
+                    menu_hidden = false;
+                    render_prompt(
+                        prompt,
+                        prompt_width,
+                        &input,
+                        cursor,
+                        suggestions,
+                        selected,
+                        menu_start,
+                        chrome,
+                        menu_hidden,
+                    )?;
+                    continue;
+                }
+                print!("\x1b8\x1b[J");
+                if let Some(chrome) = chrome {
+                    render_static_composer(prompt, &line, chrome)?;
+                } else {
+                    print!("{prompt}{line}\x1b[0m\n");
+                }
                 io::stdout().flush()?;
                 return Ok(PromptOutcome::Line(line));
             }
             Key::Interrupt => {
-                print!("\x1b8\x1b[J{prompt}\x1b[0m\n");
+                print!("\x1b8\x1b[J");
+                if let Some(chrome) = chrome {
+                    render_static_composer(prompt, "", chrome)?;
+                } else {
+                    print!("{prompt}\x1b[0m\n");
+                }
                 io::stdout().flush()?;
                 return Ok(PromptOutcome::Interrupted);
             }
@@ -79,26 +189,36 @@ fn read_interactive_line(
                     cursor -= 1;
                     input.remove(cursor);
                     selected = 0;
+                    menu_start = 0;
+                    menu_hidden = false;
                 }
             }
             Key::Delete => {
                 if cursor < input.len() {
                     input.remove(cursor);
                     selected = 0;
+                    menu_start = 0;
+                    menu_hidden = false;
                 }
             }
             Key::DeleteToEnd => {
                 input.truncate(cursor);
                 selected = 0;
+                menu_start = 0;
+                menu_hidden = false;
             }
             Key::DeleteLine => {
                 input.clear();
                 cursor = 0;
                 selected = 0;
+                menu_start = 0;
+                menu_hidden = false;
             }
             Key::DeletePreviousWord => {
                 delete_previous_word(&mut input, &mut cursor);
                 selected = 0;
+                menu_start = 0;
+                menu_hidden = false;
             }
             Key::Left => cursor = cursor.saturating_sub(1),
             Key::Right => {
@@ -113,27 +233,61 @@ fn read_interactive_line(
             }
             Key::Up if !matches.is_empty() => {
                 selected = selected.checked_sub(1).unwrap_or(matches.len() - 1);
+                if selected < menu_start {
+                    menu_start = selected.saturating_sub(MAX_MENU_ROWS - 1);
+                } else if selected == matches.len() - 1 {
+                    menu_start = matches.len().saturating_sub(MAX_MENU_ROWS);
+                }
             }
-            Key::Down if !matches.is_empty() => selected = (selected + 1) % matches.len(),
+            Key::Down if !matches.is_empty() => {
+                selected = (selected + 1) % matches.len();
+                if selected == 0 {
+                    menu_start = 0;
+                } else if selected >= menu_start + MAX_MENU_ROWS {
+                    menu_start = selected;
+                }
+            }
             Key::Tab if !matches.is_empty() => {
-                input = matches[selected].value.chars().collect();
+                input = autocomplete_command(matches[selected]);
                 cursor = input.len();
                 selected = 0;
+                menu_start = 0;
+                menu_hidden = true;
             }
             Key::Char(value) => {
-                input.insert(cursor, value);
-                cursor += 1;
-                selected = 0;
+                if value == '/' && !matches.is_empty() && command_picker_input(&input) {
+                    input = autocomplete_command(matches[selected]);
+                    cursor = input.len();
+                    selected = 0;
+                    menu_start = 0;
+                    menu_hidden = true;
+                } else {
+                    input.insert(cursor, value);
+                    cursor += 1;
+                    selected = 0;
+                    menu_start = 0;
+                    menu_hidden = false;
+                }
             }
             Key::Escape => {
-                input.clear();
-                cursor = 0;
+                menu_hidden = true;
                 selected = 0;
+                menu_start = 0;
             }
             Key::Up | Key::Down | Key::Tab | Key::Other => {}
         }
 
-        render_prompt(prompt, prompt_width, &input, cursor, suggestions, selected)?;
+        render_prompt(
+            prompt,
+            prompt_width,
+            &input,
+            cursor,
+            suggestions,
+            selected,
+            menu_start,
+            chrome,
+            menu_hidden,
+        )?;
     }
 }
 
@@ -142,6 +296,7 @@ fn read_interactive_line(
     prompt: &str,
     _prompt_width: usize,
     _suggestions: &[Suggestion<'_>],
+    _chrome: Option<&ComposerChrome>,
 ) -> Result<PromptOutcome> {
     print!("{prompt}");
     io::stdout().flush()?;
@@ -161,30 +316,48 @@ fn render_prompt(
     cursor: usize,
     suggestions: &[Suggestion<'_>],
     selected: usize,
+    menu_start: usize,
+    chrome: Option<&ComposerChrome>,
+    menu_hidden: bool,
 ) -> Result<()> {
-    let input_text = input.iter().collect::<String>();
-    let matches = matching_suggestions(input, suggestions);
+    let matches = if menu_hidden {
+        Vec::new()
+    } else {
+        matching_suggestions(input, suggestions)
+    };
+    let input_text = styled_input(input, suggestions, chrome);
     let line_width = terminal_width().unwrap_or(DEFAULT_COMPOSER_WIDTH);
     let used_width = prompt_width + input.len();
     let padding = line_width.saturating_sub(used_width);
 
-    print!(
-        "\x1b8\x1b[J{prompt}{input_text}{}\x1b[0m",
-        " ".repeat(padding)
-    );
+    print!("\x1b8\x1b[J");
 
-    for (index, suggestion) in matches.iter().enumerate() {
+    let footer_lines = if let Some(chrome) = chrome {
+        render_rule(line_width);
+        print!("{prompt}{input_text}{}\x1b[0m\n", " ".repeat(padding));
+        render_rule(line_width);
+        render_footer(line_width, chrome, !matches.is_empty());
+        3
+    } else {
+        print!("{prompt}{input_text}{}\x1b[0m", " ".repeat(padding));
+        0
+    };
+
+    let visible_matches = visible_menu_rows(&matches, selected, menu_start);
+    let menu_lines = visible_matches.len();
+    for (suggestion, selected) in visible_matches {
         println!();
-        print!("  {}", menu_row(suggestion, index == selected));
+        print!("  {}", menu_row(suggestion, selected));
     }
 
-    let menu_lines = matches.len();
-    if menu_lines > 0 {
-        print!("\x1b[{menu_lines}A\r");
-        let column = prompt_width + input.iter().take(cursor).count();
-        if column > 0 {
-            print!("\x1b[{column}C");
+    if chrome.is_some() || menu_lines > 0 {
+        let up_lines = menu_lines + footer_lines;
+        if up_lines > 0 {
+            print!("\x1b[{up_lines}A");
         }
+        print!("\r");
+        let column = prompt_width + input.iter().take(cursor).count();
+        print!("\x1b[{column}C");
     } else {
         let back = padding + input.len().saturating_sub(cursor);
         if back > 0 {
@@ -194,6 +367,161 @@ fn render_prompt(
 
     io::stdout().flush()?;
     Ok(())
+}
+
+fn render_static_composer(prompt: &str, line: &str, chrome: &ComposerChrome) -> Result<()> {
+    let line_width = terminal_width().unwrap_or(DEFAULT_COMPOSER_WIDTH);
+    render_rule(line_width);
+    println!("{prompt}{line}\x1b[0m");
+    render_rule(line_width);
+    render_footer(line_width, chrome, false);
+    io::stdout().flush()?;
+    Ok(())
+}
+
+fn render_rule(width: usize) {
+    let width = width.max(12);
+    println!("\x1b[2m{}\x1b[0m", "─".repeat(width));
+}
+
+fn render_footer(width: usize, chrome: &ComposerChrome, picker_active: bool) {
+    let left = &chrome.left_hint;
+    let right = if picker_active {
+        &chrome.picker_hint
+    } else {
+        &chrome.right_hint
+    };
+    let left_width = visible_chars(left);
+    let right_width = visible_chars(right);
+    let padding = width.saturating_sub(left_width + right_width + FOOTER_RIGHT_MARGIN);
+    println!(
+        "  {}\x1b[2m{}{}\x1b[0m",
+        left,
+        " ".repeat(padding.saturating_sub(2)),
+        right
+    );
+}
+
+fn show_help_view(chrome: &ComposerChrome) -> Result<()> {
+    use crossterm::execute;
+    use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
+    use ratatui::backend::CrosstermBackend;
+    use ratatui::Terminal;
+
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let result = (|| -> Result<()> {
+        let backend = CrosstermBackend::new(io::stdout());
+        let mut terminal = Terminal::new(backend)?;
+        terminal.clear()?;
+
+        loop {
+            terminal.draw(|frame| draw_help_view(frame, chrome))?;
+            match read_key()? {
+                Key::Escape | Key::Interrupt => break,
+                _ => {}
+            }
+        }
+
+        Ok(())
+    })();
+
+    let mut stdout = io::stdout();
+    execute!(stdout, LeaveAlternateScreen)?;
+    result
+}
+
+fn draw_help_view(frame: &mut ratatui::Frame<'_>, chrome: &ComposerChrome) {
+    use ratatui::layout::{Constraint, Direction, Layout};
+    use ratatui::style::{Color, Style};
+    use ratatui::text::{Line, Span};
+    use ratatui::widgets::Paragraph;
+
+    let area = frame.area();
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .margin(2)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(1),
+        ])
+        .split(area);
+
+    let hint = Paragraph::new("Press esc to go back").style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(hint, rows[0]);
+
+    let command_width = chrome
+        .help_rows
+        .iter()
+        .map(|row| row.command.chars().count())
+        .max()
+        .unwrap_or(0)
+        + 4;
+    let lines = chrome
+        .help_rows
+        .iter()
+        .map(|row| {
+            Line::from(vec![
+                Span::styled(
+                    format!("  {:<width$}", row.command, width = command_width),
+                    Style::default().fg(Color::Gray),
+                ),
+                Span::styled(&row.detail, Style::default().fg(Color::Gray)),
+            ])
+        })
+        .collect::<Vec<_>>();
+    let list = Paragraph::new(lines).style(Style::default().fg(Color::Gray));
+    frame.render_widget(list, rows[2]);
+}
+
+fn visible_menu_rows<'a>(
+    matches: &[&'a Suggestion<'a>],
+    selected: usize,
+    menu_start: usize,
+) -> Vec<(&'a Suggestion<'a>, bool)> {
+    if matches.len() <= MAX_MENU_ROWS {
+        return matches
+            .iter()
+            .enumerate()
+            .map(|(index, suggestion)| (*suggestion, index == selected))
+            .collect();
+    }
+
+    let max_start = matches.len().saturating_sub(MAX_MENU_ROWS);
+    let start = menu_start.min(max_start);
+    matches[start..start + MAX_MENU_ROWS]
+        .iter()
+        .enumerate()
+        .map(|(offset, suggestion)| (*suggestion, start + offset == selected))
+        .collect()
+}
+
+fn clamp_menu_start(menu_start: &mut usize, match_count: usize) {
+    if match_count <= MAX_MENU_ROWS {
+        *menu_start = 0;
+        return;
+    }
+
+    *menu_start = (*menu_start).min(match_count - MAX_MENU_ROWS);
+}
+
+fn visible_chars(value: &str) -> usize {
+    let mut count = 0usize;
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' && chars.peek() == Some(&'[') {
+            chars.next();
+            for next in chars.by_ref() {
+                if next.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            count += 1;
+        }
+    }
+    count
 }
 
 fn terminal_width() -> Option<usize> {
@@ -231,7 +559,7 @@ fn menu_row(suggestion: &Suggestion<'_>, selected: bool) -> String {
     let row = format!("{command} {}", suggestion.detail);
     if color_enabled() {
         if selected {
-            format!("\x1b[1m\x1b[38;2;0;168;204m{row}\x1b[0m")
+            format!("{ACTIVE_COLOR}{row}\x1b[0m")
         } else {
             format!(
                 "\x1b[38;2;180;180;180m{command}\x1b[0m \x1b[2m{}\x1b[0m",
@@ -241,6 +569,50 @@ fn menu_row(suggestion: &Suggestion<'_>, selected: bool) -> String {
     } else {
         row
     }
+}
+
+fn styled_input(
+    input: &[char],
+    suggestions: &[Suggestion<'_>],
+    chrome: Option<&ComposerChrome>,
+) -> String {
+    let input_text = input.iter().collect::<String>();
+    if let Some(command) = detected_command(&input_text, suggestions, chrome) {
+        let rest = &input_text[command.len()..];
+        format!("{ACTIVE_COLOR}{command}\x1b[0m{rest}")
+    } else {
+        input_text
+    }
+}
+
+fn detected_command<'a>(
+    input_text: &'a str,
+    suggestions: &[Suggestion<'_>],
+    chrome: Option<&ComposerChrome>,
+) -> Option<&'a str> {
+    if !input_text.starts_with('/') || !color_enabled() {
+        return None;
+    }
+
+    let command_end = input_text
+        .char_indices()
+        .find_map(|(index, ch)| ch.is_whitespace().then_some(index))
+        .unwrap_or(input_text.len());
+    let command = &input_text[..command_end];
+    if command.is_empty() {
+        return None;
+    }
+
+    let known = suggestions
+        .iter()
+        .any(|suggestion| suggestion.value.eq_ignore_ascii_case(command))
+        || chrome.is_some_and(|chrome| {
+            chrome
+                .active_commands
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(command))
+        });
+    known.then_some(command)
 }
 
 fn matching_suggestions<'a>(
@@ -266,6 +638,28 @@ fn matching_suggestions<'a>(
     });
 
     exact.chain(prefix).collect()
+}
+
+fn command_picker_input(input: &[char]) -> bool {
+    !input.is_empty() && input[0] == '/' && !input.iter().any(|ch| ch.is_whitespace())
+}
+
+fn is_help_command(input_text: &str, chrome: &ComposerChrome) -> bool {
+    let Some(command) = input_text.split_whitespace().next() else {
+        return false;
+    };
+
+    ["/help", "/commands", "/?"]
+        .iter()
+        .any(|known| known.eq_ignore_ascii_case(command))
+        && chrome
+            .active_commands
+            .iter()
+            .any(|known| known.eq_ignore_ascii_case(command))
+}
+
+fn autocomplete_command(suggestion: &Suggestion<'_>) -> Vec<char> {
+    format!("{} ", suggestion.value).chars().collect()
 }
 
 fn delete_previous_word(input: &mut Vec<char>, cursor: &mut usize) {
@@ -468,5 +862,58 @@ mod tests {
         assert_eq!(matches.len(), 2);
         assert_eq!(matches[0].value, "/status");
         assert_eq!(matches[1].value, "/swap");
+    }
+
+    #[test]
+    fn visible_menu_uses_stable_window() {
+        let matches = SUGGESTIONS.iter().collect::<Vec<_>>();
+
+        let rows = visible_menu_rows(&matches, 1, 0);
+
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].0.value, "/help");
+        assert!(rows[1].1);
+    }
+
+    #[test]
+    fn visible_menu_respects_window_start() {
+        const MANY_SUGGESTIONS: &[Suggestion<'static>] = &[
+            Suggestion {
+                value: "/one",
+                detail: "One",
+            },
+            Suggestion {
+                value: "/two",
+                detail: "Two",
+            },
+            Suggestion {
+                value: "/three",
+                detail: "Three",
+            },
+            Suggestion {
+                value: "/four",
+                detail: "Four",
+            },
+            Suggestion {
+                value: "/five",
+                detail: "Five",
+            },
+            Suggestion {
+                value: "/six",
+                detail: "Six",
+            },
+            Suggestion {
+                value: "/seven",
+                detail: "Seven",
+            },
+        ];
+        let matches = MANY_SUGGESTIONS.iter().collect::<Vec<_>>();
+
+        let rows = visible_menu_rows(&matches, 5, 5);
+
+        assert_eq!(rows.len(), 5);
+        assert_eq!(rows[0].0.value, "/three");
+        assert_eq!(rows[4].0.value, "/seven");
+        assert!(rows[3].1);
     }
 }

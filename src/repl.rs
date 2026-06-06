@@ -2,6 +2,7 @@ use crate::api::{ClientConfig, CodeusClient};
 use crate::auth;
 use crate::config::Config;
 use crate::harness::Session;
+use crate::harness_report;
 use crate::input::{self, PromptOutcome, Suggestion};
 use crate::onboarding;
 use crate::telemetry;
@@ -12,6 +13,7 @@ use crate::tools::{self, ToolObservation, ToolStatus};
 use anyhow::{Context, Result};
 use std::io::{self, Write};
 use std::path::PathBuf;
+use std::process::Command;
 use std::time::Instant;
 
 const MAX_MODEL_TOOL_STEPS: usize = 4;
@@ -68,6 +70,10 @@ const COMMAND_SUGGESTIONS: &[Suggestion<'static>] = &[
     Suggestion {
         value: "/permissions",
         detail: "Show approved command prefixes",
+    },
+    Suggestion {
+        value: "/harness",
+        detail: "Show harness readiness",
     },
     Suggestion {
         value: "/review",
@@ -131,26 +137,65 @@ const COMMAND_SUGGESTIONS: &[Suggestion<'static>] = &[
     },
 ];
 
+const COMMAND_HELP_ROWS: &[(&str, &str)] = &[
+    ("/help, /commands", "Show this command list"),
+    ("/status", "Show model, API base, cwd, and thread size"),
+    ("/threads", "List saved local threads"),
+    ("/resume [id|latest]", "Resume a saved thread"),
+    ("/new", "Start a fresh thread"),
+    ("/compact", "Compact older messages into summary context"),
+    ("/files [path]", "List workspace files"),
+    ("/read <path>", "Read a workspace file into the thread"),
+    ("/search <pattern> [path]", "Search workspace text"),
+    ("/git status|diff", "Run safe git inspection commands"),
+    ("/run <command>", "Run an approved command prefix"),
+    ("/approvals, /permissions", "Show approved command prefixes"),
+    ("/harness", "Show local agent-harness readiness"),
+    ("/review", "Review current working tree changes"),
+    ("/skills", "Show local skill support"),
+    ("/feedback", "Show the feedback channel"),
+    ("/swap", "Show Omniston v1beta8 swap helper"),
+    ("/trace", "Show local telemetry status"),
+    ("/theme", "Change the terminal theme and font"),
+    ("/font", "Change the coding font preference"),
+    ("/login [--no-browser]", "Connect a QC account"),
+    ("/logout", "Remove the stored session"),
+    (
+        "/cwd [path], /cd [path]",
+        "Show or change the session working directory",
+    ),
+    ("/model", "Show the active model"),
+    ("/api", "Show the active API base"),
+    ("/clear, /reset", "Clear this thread"),
+    ("/logo", "Print the QC Codeus logo"),
+    ("/exit, /quit", "Leave chat"),
+];
+
 pub async fn run(mut client: CodeusClient) -> Result<()> {
     let stored = Config::load()?;
     let mut terminal = Terminal::detect_with_theme(stored.theme.as_deref());
     let mut session = Session::new()?;
 
-    print_welcome(&terminal, &client, &session);
+    print_welcome(&terminal, &client, &session).await;
 
     loop {
-        let (prompt, prompt_width) = prompt(&terminal, &session);
-        let input =
-            match input::read_line_with_suggestions(&prompt, prompt_width, COMMAND_SUGGESTIONS)? {
-                PromptOutcome::Line(input) => input,
-                PromptOutcome::Eof | PromptOutcome::Interrupted => break,
-            };
+        let (prompt, prompt_width, chrome) = prompt(&terminal, &session);
+        let input = match input::read_line_with_chrome(
+            &prompt,
+            prompt_width,
+            COMMAND_SUGGESTIONS,
+            &chrome,
+        )? {
+            PromptOutcome::Line(input) => input,
+            PromptOutcome::Eof | PromptOutcome::Interrupted => break,
+        };
         if input.is_empty() {
             continue;
         }
 
-        if input.starts_with('/') {
-            match handle_command(&input, &mut terminal, &mut client, &mut session).await? {
+        let command_input = input.trim();
+        if command_input.starts_with('/') {
+            match handle_command(command_input, &mut terminal, &mut client, &mut session).await? {
                 CommandResult::Continue => continue,
                 CommandResult::Exit => break,
             }
@@ -158,7 +203,7 @@ pub async fn run(mut client: CodeusClient) -> Result<()> {
 
         if client.config().token.is_none() {
             println!(
-                "{} Sign in with /login before sending chat messages. Auth only starts when you ask for it.",
+                "{} Sign in with /login before sending chat messages.",
                 terminal.warn("•")
             );
             continue;
@@ -464,6 +509,12 @@ async fn handle_command(
             );
             Ok(CommandResult::Continue)
         }
+        "/harness" => {
+            let config = Config::load()?;
+            let report = harness_report::build_report(&config)?;
+            harness_report::print_text(&report);
+            Ok(CommandResult::Continue)
+        }
         "/review" => {
             if client.config().token.is_none() {
                 println!(
@@ -583,65 +634,39 @@ async fn handle_command(
     }
 }
 
-fn print_welcome(terminal: &Terminal, client: &CodeusClient, session: &Session) {
-    let cwd = compact_path(session.cwd());
-
-    print_intro_box(terminal, &client.config().model, &cwd);
-    println!();
-    println!(
-        "{}",
-        format!(
-            "{} Type /help for commands or ask for a concrete codebase change.",
-            terminal.title("Tip:")
-        )
+async fn print_welcome(terminal: &Terminal, client: &CodeusClient, session: &Session) {
+    let subscription = subscription_label(client).await;
+    print_intro(
+        terminal,
+        &client.config().model,
+        &subscription,
+        &session.cwd().display().to_string(),
     );
-    println!();
 }
 
 fn print_help(terminal: &Terminal) {
-    println!("{}", terminal.accent("QC Codeus commands"));
-    println!("  /help, /commands       Show this command list");
-    println!("  /status                Show model, API base, cwd, and thread size");
-    println!("  /threads               List saved local threads");
-    println!("  /resume [id|latest]    Resume a saved thread");
-    println!("  /new                   Start a fresh thread");
-    println!("  /compact               Compact older messages into summary context");
-    println!("  /files [path]          List workspace files");
-    println!("  /read <path>           Read a workspace file into the thread");
-    println!("  /search <pattern> [path] Search workspace text");
-    println!("  /git status|diff       Run safe git inspection commands");
-    println!("  /run <command>         Run an approved command prefix");
-    println!("  /approvals, /permissions Show approved command prefixes");
-    println!("  /review                Review current working tree changes");
-    println!("  /skills                Show local skill support");
-    println!("  /feedback              Show the feedback channel");
-    println!("  /swap                  Show Omniston v1beta8 swap helper");
-    println!("  /trace                 Show local telemetry status");
-    println!("  /theme                 Change the terminal theme and font");
-    println!("  /font                  Change the coding font preference");
-    println!("  /login [--no-browser]  Connect a QC account");
-    println!("  /logout                Remove the stored session");
-    println!("  /cwd [path], /cd [path] Show or change the session working directory");
-    println!("  /model                 Show the active model");
-    println!("  /api                   Show the active API base");
-    println!("  /clear, /reset         Clear this thread");
-    println!("  /logo                  Print the QC Codeus logo");
-    println!("  /exit, /quit           Leave chat");
+    println!();
+    for row in command_help_rows() {
+        println!("  {:<28} {}", row.command, terminal.muted(&row.detail));
+    }
+    println!();
 }
 
 fn print_observation(terminal: &Terminal, observation: &ToolObservation) {
-    let label = match observation.status {
-        ToolStatus::Success => terminal.success("tool ok"),
-        ToolStatus::Failed => format!("{} tool failed", terminal.warn("•")),
-        ToolStatus::Denied => format!("{} tool denied", terminal.warn("•")),
+    let status = match observation.status {
+        ToolStatus::Success => "ok",
+        ToolStatus::Failed => "failed",
+        ToolStatus::Denied => "denied",
     };
-    println!(
-        "{label} {} ({}ms)",
+    let title = format!(
+        "tool {status}: {} ({}ms)",
         observation.name, observation.elapsed_ms
     );
-    if !observation.output.trim().is_empty() {
-        println!("{}", observation.output);
-    }
+    let colored_title = match observation.status {
+        ToolStatus::Success => terminal.success(&title),
+        ToolStatus::Failed | ToolStatus::Denied => terminal.warn(&title),
+    };
+    print_output_panel(terminal, &title, &colored_title, observation.output.trim());
     let _ = telemetry::record(
         "codeus.tool.observed",
         serde_json::json!({
@@ -783,74 +808,211 @@ fn auth_label(client: &CodeusClient) -> &'static str {
     }
 }
 
-fn prompt(terminal: &Terminal, _session: &Session) -> (String, usize) {
-    (terminal.composer_prompt(), 1)
-}
-
-fn print_intro_box(terminal: &Terminal, model: &str, cwd: &str) {
-    const WIDTH: usize = 62;
-    let border = format!("┌{}┐", "┄".repeat(WIDTH + 2));
-    let footer = format!("└{}┘", "┄".repeat(WIDTH + 2));
-
-    println!("{}", terminal.accent(&border));
-    print_box_line(terminal, WIDTH, "");
-    print_box_line(
-        terminal,
-        WIDTH,
-        &format!("</> QC Codeus (v{})", env!("CARGO_PKG_VERSION")),
-    );
-    print_box_line(terminal, WIDTH, "");
-    print_box_line(
-        terminal,
-        WIDTH,
-        &format!("{:<11}{}   /model to change", "model:", model),
-    );
-    print_box_line(terminal, WIDTH, &format!("{:<11}{}", "directory:", cwd));
-    println!("{}", terminal.accent(&footer));
-}
-
-fn print_box_line(terminal: &Terminal, width: usize, value: &str) {
-    let visible: String = value.chars().take(width).collect();
-    let padding = width.saturating_sub(visible.chars().count());
-    println!(
-        "{} {}{} {}",
-        terminal.accent("┆"),
-        color_box_line(terminal, &visible),
-        " ".repeat(padding),
-        terminal.accent("┆")
-    );
-}
-
-fn color_box_line(terminal: &Terminal, value: &str) -> String {
-    if value.starts_with("</> QC Codeus") {
-        return value.replacen("QC Codeus", &terminal.title("QC Codeus"), 1);
+async fn subscription_label(client: &CodeusClient) -> String {
+    if client.config().token.is_none() {
+        return "not connected".to_string();
     }
 
-    if let Some(rest) = value.strip_prefix("model:") {
-        let rest = rest.replacen("/model", &terminal.accent("/model"), 1);
-        return format!("{}{}", terminal.muted("model:"), rest);
+    match client.account().await {
+        Ok(account) => account_value(
+            &account,
+            &["activePlan", "active_plan", "plan", "subscription"],
+        )
+        .unwrap_or_else(|| "QC account".to_string()),
+        Err(_) => "QC account".to_string(),
     }
-
-    if let Some(rest) = value.strip_prefix("directory:") {
-        return format!("{}{}", terminal.muted("directory:"), rest);
-    }
-
-    value.to_string()
 }
 
-fn compact_path(path: &PathBuf) -> String {
-    if let Some(home) = dirs::home_dir() {
-        if let Ok(stripped) = path.strip_prefix(&home) {
-            let stripped = stripped.display().to_string();
-            return if stripped.is_empty() {
-                "~".to_string()
+fn account_value(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    let object = value.as_object()?;
+    for key in keys {
+        let Some(value) = object.get(*key) else {
+            continue;
+        };
+        if let Some(text) = value.as_str().filter(|text| !text.trim().is_empty()) {
+            return Some(format_subscription(text));
+        }
+        if value.is_object() {
+            if let Some(name) = account_value(value, &["name", "label", "plan", "tier"]) {
+                return Some(name);
+            }
+        }
+    }
+    None
+}
+
+fn format_subscription(value: &str) -> String {
+    value
+        .split(['-', '_', ' '])
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => {
+                    let mut text = first.to_uppercase().collect::<String>();
+                    text.push_str(&chars.as_str().to_ascii_lowercase());
+                    text
+                }
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn display_model(model: &str) -> String {
+    model
+        .split(['-', '_'])
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            if part.chars().all(|ch| ch.is_ascii_digit() || ch == '.') {
+                part.to_string()
             } else {
-                format!("~/{}", stripped)
-            };
+                let mut chars = part.chars();
+                match chars.next() {
+                    Some(first) => {
+                        let mut text = first.to_uppercase().collect::<String>();
+                        text.push_str(chars.as_str());
+                        text
+                    }
+                    None => String::new(),
+                }
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn prompt(terminal: &Terminal, session: &Session) -> (String, usize, input::ComposerChrome) {
+    let project = project_name(session.cwd());
+    let branch = git_branch(session.cwd());
+    let left_hint = match branch {
+        Some(branch) => format!("{} ({})", terminal.muted(&project), terminal.warn(&branch)),
+        None => terminal.muted(&project),
+    };
+    let chrome = input::ComposerChrome {
+        left_hint,
+        right_hint: "• /help for commands".to_string(),
+        picker_hint: String::new(),
+        active_commands: active_commands(),
+        help_rows: command_help_rows(),
+    };
+    (terminal.composer_prompt(), 2, chrome)
+}
+
+fn command_help_rows() -> Vec<input::HelpRow> {
+    COMMAND_HELP_ROWS
+        .iter()
+        .map(|(command, detail)| input::HelpRow {
+            command: (*command).to_string(),
+            detail: (*detail).to_string(),
+        })
+        .collect()
+}
+
+fn active_commands() -> Vec<String> {
+    let mut commands = COMMAND_HELP_ROWS
+        .iter()
+        .flat_map(|(commands, _)| commands.split(','))
+        .filter_map(|command| command.split_whitespace().next())
+        .map(str::trim)
+        .filter(|command| command.starts_with('/'))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    commands.push("/?".to_string());
+    commands
+}
+
+fn project_name(path: &std::path::Path) -> String {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("/")
+        .to_string()
+}
+
+fn git_branch(cwd: &std::path::Path) -> Option<String> {
+    let output = Command::new("git")
+        .args(["branch", "--show-current"])
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!branch.is_empty()).then_some(branch)
+}
+
+fn print_intro(terminal: &Terminal, model: &str, subscription: &str, cwd: &str) {
+    println!();
+    let logo = terminal.logo_lines();
+    let text = [
+        format!(
+            "{} {}",
+            terminal.title("QC Codeus"),
+            terminal.muted(&format!("v{}", env!("CARGO_PKG_VERSION")))
+        ),
+        terminal.muted(&format!("{} · {}", display_model(model), subscription)),
+        terminal.muted(cwd),
+    ];
+    let logo_width = logo
+        .iter()
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or(0);
+
+    for index in 0..logo.len().max(text.len()) {
+        let logo_line = logo.get(index).map(String::as_str).unwrap_or("");
+        let text_line = text.get(index).map(String::as_str).unwrap_or("");
+        println!(
+            "  {}  {}",
+            terminal.warn(&format!("{logo_line:<logo_width$}")),
+            text_line
+        );
+    }
+    println!();
+}
+
+fn print_output_panel(terminal: &Terminal, plain_title: &str, colored_title: &str, output: &str) {
+    const WIDTH: usize = 76;
+    let title_width = plain_title.chars().count();
+    let remaining = WIDTH.saturating_sub(title_width + 2);
+    println!(
+        "{} {} {}",
+        terminal.accent("┌"),
+        colored_title,
+        terminal.accent(&format!("{}┐", "─".repeat(remaining)))
+    );
+
+    if output.is_empty() {
+        print_panel_line(terminal, WIDTH, "");
+    } else {
+        for line in output.lines().take(18) {
+            print_panel_line(terminal, WIDTH, line);
+        }
+        if output.lines().count() > 18 {
+            print_panel_line(
+                terminal,
+                WIDTH,
+                "[truncated in terminal view; full output is saved in thread context]",
+            );
         }
     }
 
-    path.display().to_string()
+    println!("{}", terminal.accent(&format!("└{}┘", "─".repeat(WIDTH))));
+}
+
+fn print_panel_line(terminal: &Terminal, width: usize, value: &str) {
+    let visible: String = value.chars().take(width.saturating_sub(2)).collect();
+    let padding = width.saturating_sub(visible.chars().count() + 2);
+    println!(
+        "{} {}{} {}",
+        terminal.accent("│"),
+        visible,
+        " ".repeat(padding),
+        terminal.accent("│")
+    );
 }
 
 fn expand_cwd(path: &str) -> Result<PathBuf> {

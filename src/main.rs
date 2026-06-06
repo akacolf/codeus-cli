@@ -4,6 +4,7 @@ mod auth;
 mod config;
 mod context;
 mod harness;
+mod harness_report;
 mod input;
 mod onboarding;
 mod repl;
@@ -97,6 +98,8 @@ enum Command {
     Usage,
     /// Run local diagnostics for auth, proxy, config, and workspace health.
     Doctor,
+    /// Print the local agent-harness readiness report.
+    Harness,
     /// Print resolved CLI status.
     Status,
     /// Print latest local thread state.
@@ -193,6 +196,7 @@ async fn main() -> Result<()> {
             usage_command(&client, cli.output_format).await
         }
         Some(Command::Doctor) => doctor_command(&globals, &stored, cli.output_format).await,
+        Some(Command::Harness) => harness_command(&stored, cli.output_format),
         Some(Command::Status) => status_command(&globals, &stored, cli.output_format),
         Some(Command::State) => state_command(cli.output_format),
         Some(Command::Update) => update::run_update().await,
@@ -428,6 +432,15 @@ fn status_command(
     let report = build_status_report(globals, stored)?;
     match output_format {
         OutputFormat::Text => print_status_text(&report),
+        OutputFormat::Json => print_json(&report)?,
+    }
+    Ok(())
+}
+
+fn harness_command(stored: &Config, output_format: OutputFormat) -> Result<()> {
+    let report = harness_report::build_report(stored)?;
+    match output_format {
+        OutputFormat::Text => harness_report::print_text(&report),
         OutputFormat::Json => print_json(&report)?,
     }
     Ok(())

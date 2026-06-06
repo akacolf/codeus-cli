@@ -68,6 +68,24 @@ async fn mock_proxy_harness_covers_diagnostics_status_and_streaming() {
     assert_eq!(status_json["permission_mode"], "read-only");
     assert_eq!(status_json["auth"]["signed_in"], true);
 
+    let harness = codeus(&home, &workspace)
+        .args(["--output-format", "json", "harness"])
+        .output()
+        .unwrap();
+    assert!(
+        harness.status.success(),
+        "harness failed: {}",
+        String::from_utf8_lossy(&harness.stderr)
+    );
+    let harness_json: Value = serde_json::from_slice(&harness.stdout).unwrap();
+    let canonical_workspace = fs::canonicalize(&workspace).unwrap();
+    assert_eq!(harness_json["cwd"], canonical_workspace.to_str().unwrap());
+    assert!(harness_json["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability["name"] == "tool_loop" && capability["status"] == "ready"));
+
     let run = codeus(&home, &workspace)
         .args([
             "--api-base",
