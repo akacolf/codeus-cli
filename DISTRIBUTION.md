@@ -74,7 +74,6 @@ Recommended behavior:
 - On `codeus` startup, make a short-timeout request to release metadata.
 - Cache the latest-seen check time and only check once per day.
 - If a newer stable version exists, print a concise notice with the command for the user's install channel.
-- `codeus update` prints the right command for curl/GitHub-release, Homebrew, npm, or Cargo installs.
 - For Homebrew and npm installs, print `brew upgrade codeus` or `npm update -g @quantumclub/codeus`.
 - Allow `CODEUS_NO_UPDATE_CHECK=1` and `config.toml` opt-out for managed environments.
 

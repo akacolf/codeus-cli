@@ -11,6 +11,7 @@ mod input;
 mod onboarding;
 mod repl;
 mod sandbox;
+mod swaps;
 mod telemetry;
 mod terminal;
 mod thread_store;
@@ -33,39 +34,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[derive(Debug, Parser)]
 #[command(name = "codeus")]
 #[command(author, version, about = "Terminal-native QC Codeus")]
-struct Cli {
-    #[arg(long, global = true, env = "CODEUS_API_BASE")]
-    api_base: Option<String>,
-
-    #[arg(long, global = true, env = "CODEUS_MODEL")]
-    model: Option<String>,
-
-    #[arg(long, global = true, env = "CODEUS_OUTPUT_FORMAT", value_enum, default_value_t = OutputFormat::Text)]
-    output_format: OutputFormat,
-
-    #[arg(long, global = true, env = "CODEUS_PERMISSION_MODE", value_enum)]
-    permission_mode: Option<PermissionMode>,
-
-    #[arg(long, global = true, env = "CODEUS_SANDBOX_POLICY", value_enum)]
-    sandbox_policy: Option<SandboxPolicy>,
-
-    #[arg(long, global = true, env = "CODEUS_APPROVAL_MODE", value_enum)]
-    approval_mode: Option<ApprovalMode>,
-
-    #[arg(
-        long,
-        global = true,
-        env = "CODEUS_SESSION_TOKEN",
-        hide_env_values = true
-    )]
-    token: Option<String>,
-
-    #[command(subcommand)]
-    command: Option<Command>,
-
-    #[arg(value_name = "PROMPT", trailing_var_arg = true)]
-    prompt: Vec<String>,
-}
+struct Cli {}
 
 #[derive(Debug, Clone)]
 struct GlobalOptions {
@@ -166,63 +135,20 @@ enum ConfigCommand {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
-    let cli = Cli::parse();
-    if let Some(permission_mode) = cli.permission_mode {
-        std::env::set_var("CODEUS_PERMISSION_MODE", permission_mode.to_string());
-    }
-    if let Some(sandbox_policy) = cli.sandbox_policy {
-        std::env::set_var("CODEUS_SANDBOX_POLICY", sandbox_policy.to_string());
-    }
-    if let Some(approval_mode) = cli.approval_mode {
-        std::env::set_var("CODEUS_APPROVAL_MODE", approval_mode.to_string());
-    }
+    let _cli = Cli::parse();
     let stored = Config::load()?;
     let globals = GlobalOptions {
-        api_base: cli.api_base.clone(),
-        model: cli.model.clone(),
-        token: cli.token.clone(),
-        permission_mode: cli.permission_mode,
-        sandbox_policy: cli.sandbox_policy,
-        approval_mode: cli.approval_mode,
+        api_base: None,
+        model: None,
+        token: None,
+        permission_mode: None,
+        sandbox_policy: None,
+        approval_mode: None,
     };
 
-    match cli.command {
-        Some(Command::Chat(args)) => {
-            let stored = maybe_onboard(&globals, stored, args.model.clone()).await?;
-            update::maybe_print_update_notice(&stored).await;
-            let client = client_from(&globals, &stored, args.model, AuthMode::Passive).await?;
-            repl::run(client).await
-        }
-        Some(Command::Run(args)) => {
-            let client = client_from(&globals, &stored, args.model, AuthMode::Required).await?;
-            run_prompt(client, args.prompt, args.cwd, cli.output_format).await
-        }
-        Some(Command::Login(args)) => login(args).await,
-        Some(Command::Logout) => logout(),
-        Some(Command::Account) => {
-            let client = client_from(&globals, &stored, None, AuthMode::Required).await?;
-            account_command(&client, cli.output_format).await
-        }
-        Some(Command::Usage) => {
-            let client = client_from(&globals, &stored, None, AuthMode::Required).await?;
-            usage_command(&client, cli.output_format).await
-        }
-        Some(Command::Doctor) => doctor_command(&globals, &stored, cli.output_format).await,
-        Some(Command::Harness) => harness_command(&stored, cli.output_format),
-        Some(Command::Status) => status_command(&globals, &stored, cli.output_format),
-        Some(Command::State) => state_command(cli.output_format),
-        Some(Command::Update) => update::run_update().await,
-        Some(Command::Config { command }) => config_command(command, stored, cli.output_format),
-        None if !cli.prompt.is_empty() => {
-            let client = client_from(&globals, &stored, None, AuthMode::Required).await?;
-            run_prompt(client, cli.prompt, None, cli.output_format).await
-        }
-        None => {
-            let stored = maybe_onboard(&globals, stored, None).await?;
-            update::maybe_print_update_notice(&stored).await;
-            repl::run(client_from(&globals, &stored, None, AuthMode::Passive).await?).await
-        }
-    }
+    let stored = maybe_onboard(&globals, stored, None).await?;
+    update::maybe_print_update_notice(&stored).await;
+    repl::run(client_from(&globals, &stored, None, AuthMode::Passive).await?).await
 }
 
 async fn run_prompt(
@@ -282,7 +208,7 @@ pub async fn stream_and_print(client: &CodeusClient, messages: &[Message]) -> Re
 async fn client_from(
     globals: &GlobalOptions,
     stored: &Config,
-    command_model: Option<String>,
+    _command_model: Option<String>,
     auth_mode: AuthMode,
 ) -> Result<CodeusClient> {
     let mut stored = stored.clone();
@@ -324,20 +250,13 @@ async fn client_from(
 
     if matches!(auth_mode, AuthMode::Required) && token.is_none() {
         bail!(
-            "No Codeus account is connected. Run `codeus` to open the terminal interface, then use `/login`, or run `codeus login --token ...` for development."
+            "No Codeus account is connected. Run `codeus` to open the terminal interface and connect your Quantum Club account."
         );
     }
 
     let config = ClientConfig {
-        api_base: globals
-            .api_base
-            .clone()
-            .or_else(|| stored.api_base.clone())
-            .unwrap_or_else(|| DEFAULT_API_BASE.to_string()),
-        model: command_model
-            .or_else(|| globals.model.clone())
-            .or_else(|| stored.model.clone())
-            .unwrap_or_else(|| DEFAULT_MODEL.to_string()),
+        api_base: DEFAULT_API_BASE.to_string(),
+        model: DEFAULT_MODEL.to_string(),
         token,
     };
 
@@ -756,7 +675,7 @@ async fn build_doctor_report(globals: &GlobalOptions, stored: &Config) -> Doctor
                 auth.token_source, auth.token_expired
             )
         } else {
-            "no session token; run `codeus login` before chat or run".to_string()
+            "no session token; run `codeus` to connect your Quantum Club account".to_string()
         },
     );
 

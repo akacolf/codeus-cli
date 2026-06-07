@@ -51,7 +51,7 @@ pub async fn run(
                     println!(
                         "{}",
                         terminal.muted(
-                            "You can run `codeus login` later, or `codeus login --token ...` for development/support."
+                            "Run `codeus` again when you are ready to connect your Quantum Club account."
                         )
                     );
                     process::exit(0);

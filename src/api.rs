@@ -402,7 +402,7 @@ impl CodeusClient {
         if !status.is_success() {
             let detail = text.trim();
             if status == StatusCode::UNAUTHORIZED {
-                bail!("not signed in; run `codeus login`");
+                bail!("not signed in; run `codeus` to connect your Quantum Club account");
             }
             bail!(
                 "proxy returned {status}: {}",

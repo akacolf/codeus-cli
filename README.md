@@ -32,22 +32,6 @@ See [DISTRIBUTION.md](DISTRIBUTION.md) for the release checklist and update plan
 
 ```bash
 codeus
-codeus "explain this repo"
-codeus run "summarize the current project"
-codeus chat
-codeus login
-codeus account
-codeus usage
-codeus doctor
-codeus harness
-codeus status --output-format json
-codeus state
-codeus update
-codeus config show
-codeus config env
-codeus config set model sonnet-4.6
-codeus config set permission_mode read-only
-codeus config set sandbox_policy policy-only
 ```
 
 Running `codeus` with no arguments starts the interactive CLI. First launch shows the Codeus logo, lets users choose a named syntax-style terminal theme with a live preview, then signs in with a Quantum Club account.
@@ -60,7 +44,7 @@ https://api.quantumclub.sh/v1
 
 ## Interactive chat
 
-`codeus` and `codeus chat` open the terminal chat surface with the Codeus logo, streamed replies, and slash commands:
+`codeus` opens the terminal chat surface with the Codeus logo, streamed replies, and slash commands:
 
 ```text
 /help, /commands       Show the command list
@@ -150,15 +134,11 @@ Config is stored at:
 ~/.config/codeus/config.toml
 ```
 
-Supported environment overrides:
+The hosted API and model are built into the CLI:
 
-```bash
-CODEUS_API_BASE=https://api.quantumclub.sh/v1
-CODEUS_MODEL=sonnet-4.6
-CODEUS_SESSION_TOKEN=...
-CODEUS_SANDBOX_POLICY=policy-only
-CODEUS_NO_UPDATE_CHECK=1
-CODEUS_UPDATE_ENDPOINT=https://github.com/atomicfield/codeus-cli/releases/latest/download/codeus-release.json
+```text
+https://api.quantumclub.sh/v1
+sonnet-4.6
 ```
 
 The CLI sends `Authorization: Bearer <token>` after the QC browser login completes. Browser login uses the website-backed device-link API:
@@ -168,7 +148,7 @@ The CLI sends `Authorization: Bearer <token>` after the QC browser login complet
 /device/link/poll
 ```
 
-The same `CODEUS_API_BASE` is used for chat, account, and usage:
+The hosted API serves chat, account, and usage:
 
 ```text
 /chat/completions
@@ -176,9 +156,7 @@ The same `CODEUS_API_BASE` is used for chat, account, and usage:
 /balance
 ```
 
-`CODEUS_SESSION_TOKEN` and `codeus login --token ...` remain available for development and support, but users should not need to paste tokens for normal sessions.
-
-Set `CODEUS_SESSION_TOKEN` only to a Codeus session token issued by QC's hosted proxy or support tooling. Do not set it to an upstream provider API key; provider credentials stay server-side.
+Users should not paste tokens or configure provider credentials locally. The CLI stores only a Codeus session token issued by QC's hosted account flow; upstream provider credentials stay server-side.
 
 The first-run setup stores only local CLI preferences and the Codeus session:
 
@@ -201,29 +179,7 @@ CODEUS_NO_UPDATE_CHECK=1
 
 ## Diagnostics and automation
 
-Run `codeus doctor` before first use or when support needs a health check. It validates the resolved config, auth token state, API base, model, workspace access, saved-chat storage, telemetry path, permission mode, approved command prefixes, and authenticated account route when a token is available.
-
-Core inspection commands support machine-readable output:
-
-```bash
-codeus --output-format json doctor
-codeus --output-format json status
-codeus --output-format json state
-codeus --output-format json config show
-codeus --output-format json config env
-codeus --output-format json run "summarize this repo"
-```
-
-`status` reports the resolved model, auth source, permission mode, current workspace, loaded `AGENTS.md` stats, saved chat count, trace path, and approved command prefixes. `state` reports the latest saved local chat.
-
-Permission modes can be set with `--permission-mode`, `CODEUS_PERMISSION_MODE`, or `config.toml`:
-
-```bash
-codeus --permission-mode read-only "summarize this repo"
-codeus config set permission_mode workspace-write
-```
-
-`read-only` allows workspace inspection tools and read-only command prefixes such as `git status`, `git diff`, `ls`, `pwd`, and `rg`. `workspace-write` is the default and allows exact-snippet file edits plus approved command prefixes.
+The consumer binary intentionally exposes only `codeus`. Diagnostics, account inspection, config mutation, and one-shot prompt commands are internal development surfaces rather than public CLI commands.
 
 ## Development
 
@@ -233,8 +189,7 @@ This is a Rust CLI, so Cargo is the build and debugging toolchain:
 cargo fmt
 cargo check
 cargo test
-cargo run -- "explain this repo"
-cargo run -- chat
+cargo run
 cargo build --release
 ```
 
@@ -242,15 +197,16 @@ For hot reload during CLI development, install `cargo-watch` and run:
 
 ```bash
 cargo install cargo-watch
-cargo watch -x 'run -- chat'
-cargo watch -x 'run -- "explain this repo"'
+cargo watch -x run
 ```
 
-The test suite includes a deterministic mock proxy harness that starts a local `/v1` API, exercises `doctor`, `status --output-format json`, and a streamed `run`, and does not require real QC credentials.
+The test suite includes a deterministic CLI harness and does not require real QC credentials.
 
-## Vercel API proxy
+## Hosted API proxy
 
-Production login and billing live in the Quantum Club website API (`/api/codeus/v1/*`), which is rewritten for `https://api.quantumclub.sh/v1`. The repo also includes a Rust Vercel Function for standalone proxy experiments, but the hosted website API is the preferred production deployment because Vercel does not provide a first-class Rust project preset.
+Production login, billing, and chat proxying should live behind `https://api.quantumclub.sh/v1`. Today that can be backed by the Quantum Club website API (`/api/codeus/v1/*`), but the clean long-term shape is a separate proxy service/repo owned by the API boundary. That keeps website releases, CLI releases, secrets, rate limits, observability, and swap integration work independently deployable.
+
+The repo still includes a Rust Vercel Function for standalone proxy experiments, but it is not the consumer distribution path.
 
 The optional Rust function can expose:
 
@@ -267,16 +223,14 @@ The optional Rust function can expose:
 
 The Vercel entrypoint is `api/index.rs`, declared as its own `[[bin]]` in `Cargo.toml` per Vercel's Rust runtime requirements. `vercel.json` rewrites `/v1/*` into that Rust function, where Axum routes the individual API paths.
 
-Deploy this repo to Vercel, set the server-side environment variables, then point the CLI at the deployment:
+Deploy this repo to Vercel only for standalone proxy experiments:
 
 ```bash
 vercel pull --yes --environment preview
 vercel deploy
-codeus config set api_base https://your-codeus-api.vercel.app/v1
-codeus login
 ```
 
-If deploying this repository as a standalone Vercel project with the `Other` preset, verify that `/v1/device/link/init` returns JSON. If Vercel serves a 404 before this function runs, use the website API host instead of the standalone Rust project.
+If deploying this repository as a standalone Vercel project with the `Other` preset, verify that `/v1/device/link/init` returns JSON. If Vercel serves a 404 before this function runs, use the hosted API service instead of the standalone Rust project.
 
 For local prebuilt Vercel builds, the Rust runtime invokes `cargo zigbuild` for the Linux serverless target. Install `rustup`, `zig`, and `cargo-zigbuild` before running:
 
@@ -284,12 +238,17 @@ For local prebuilt Vercel builds, the Rust runtime invokes `cargo zigbuild` for 
 vercel build --prod --yes
 ```
 
-Required Vercel environment variables:
+Only set the following environment variables if this Rust repo is deployed as a standalone Vercel proxy.
+
+Required standalone proxy environment variables:
 
 ```bash
 CODEUS_AUTH_BASE=https://your-qc-auth-service.example.com
-CODEUS_CHAT_BASE=https://your-openai-compatible-chat-service.example.com/v1
+AI_GATEWAY_API_KEY=your-vercel-ai-gateway-key
+CODEUS_CHAT_BASE=https://your-openai-compatible-llm-gateway.example.com/v1
 ```
+
+For chat completions, the standalone proxy tries Vercel AI Gateway first so the deployment can consume its included AI Gateway credits before falling back to the configured LLM gateway. The Vercel gateway uses `https://ai-gateway.vercel.sh/v1` by default and authenticates with `AI_GATEWAY_API_KEY` or `VERCEL_OIDC_TOKEN`. The fallback LLM gateway uses `CODEUS_CHAT_BASE` or `CODEUS_CHAT_COMPLETIONS_URL`. If that fallback gateway requires its own upstream credential, provide it as `CODEUS_CHAT_API_KEY`; otherwise omit it and the user's Codeus bearer token is forwarded to the configured fallback gateway.
 
 For browser login, the proxy tries the website-style device-link paths first:
 
@@ -318,7 +277,9 @@ CODEUS_DEVICE_TOKEN_URL=https://your-qc-auth-service.example.com/oauth/token
 CODEUS_REFRESH_URL=https://your-qc-auth-service.example.com/oauth/token
 CODEUS_ACCOUNT_URL=https://your-qc-auth-service.example.com/account
 CODEUS_USAGE_URL=https://your-qc-auth-service.example.com/usage
-CODEUS_CHAT_COMPLETIONS_URL=https://your-openai-compatible-chat-service.example.com/v1/chat/completions
+CODEUS_VERCEL_AI_GATEWAY_BASE=https://ai-gateway.vercel.sh/v1
+CODEUS_VERCEL_AI_GATEWAY_CHAT_COMPLETIONS_URL=https://ai-gateway.vercel.sh/v1/chat/completions
+CODEUS_CHAT_COMPLETIONS_URL=https://your-openai-compatible-llm-gateway.example.com/v1/chat/completions
 ```
 
 Optional secret/provider settings:
@@ -326,16 +287,16 @@ Optional secret/provider settings:
 ```bash
 CODEUS_OAUTH_CLIENT_ID=codeus-cli
 CODEUS_OAUTH_SCOPE="chat account usage"
-CODEUS_CHAT_API_KEY=server-side-provider-or-gateway-key
+CODEUS_CHAT_API_KEY=optional-server-side-llm-gateway-key
 CODEUS_ACCOUNT_BASE=https://your-qc-account-service.example.com
 ```
 
-If `CODEUS_CHAT_API_KEY` is set, Vercel sends it to the chat upstream and forwards the user's Codeus session as `x-codeus-session-token`. If it is not set, Vercel forwards the user's bearer token as `Authorization`.
+If `AI_GATEWAY_API_KEY` or `VERCEL_OIDC_TOKEN` is set, Vercel sends chat traffic to AI Gateway first. If AI Gateway returns a credit, rate-limit, or upstream availability status such as 402, 429, or 5xx, the proxy retries against the LLM gateway. If `CODEUS_CHAT_API_KEY` is set for the LLM gateway, Vercel sends it to that upstream and forwards the user's Codeus session as `x-codeus-session-token`. If it is not set, Vercel forwards the user's bearer token as `Authorization` to the configured fallback gateway.
 
 ## Roadmap
 
 - Signed release archives and checksum verification
 - Curl, Homebrew, and npm install channels
-- Startup update notices and `codeus update` for direct binary installs
+- Startup update notices for direct binary installs
 - Shell completions
 - Shared model/catalog metadata with the desktop app

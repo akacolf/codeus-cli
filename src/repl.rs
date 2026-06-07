@@ -162,10 +162,6 @@ async fn run_agent_turn(
                 let config = Config::load()?;
                 for tool_call in response.tool_calls {
                     let call = tool_protocol::from_chat_tool_call(&tool_call)?;
-                    println!(
-                        "{}",
-                        terminal.muted(&format!("QC Codeus requested tool `{}`", call.name))
-                    );
                     let observation = tool_protocol::execute_tool_call(
                         session.cwd(),
                         &config,
@@ -178,10 +174,6 @@ async fn run_agent_turn(
                 }
             }
             Ok(Some(call)) => {
-                println!(
-                    "{}",
-                    terminal.muted(&format!("QC Codeus requested tool `{}`", call.name))
-                );
                 let config = Config::load()?;
                 let observation =
                     tool_protocol::execute_tool_call(session.cwd(), &config, &call, &mut approval)
@@ -300,6 +292,7 @@ fn should_buffer_potential_tool_call(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn buffers_partial_tool_call_prefix() {
@@ -314,6 +307,63 @@ mod tests {
     fn does_not_buffer_normal_text() {
         assert!(!should_buffer_potential_tool_call("hello"));
         assert!(!should_buffer_potential_tool_call("I can help with that."));
+    }
+
+    #[test]
+    fn formats_read_observation_as_compact_row() {
+        let display = compact_tool_display(&ToolObservation {
+            name: "read_file".to_string(),
+            args: json!({ "path": "package.json" }),
+            status: ToolStatus::Success,
+            output: "one\ntwo\nthree\n".to_string(),
+            elapsed_ms: 4,
+        });
+
+        assert_eq!(
+            display,
+            CompactToolDisplay {
+                title: "Read(package.json)".to_string(),
+                detail: Some("Read 3 lines".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn formats_search_observation_without_listing_files_in_title() {
+        let display = compact_tool_display(&ToolObservation {
+            name: "search_text".to_string(),
+            args: json!({ "pattern": "**/*.test.{js,ts,jsx,tsx}" }),
+            status: ToolStatus::Success,
+            output: "src/a.test.ts:1: test\nsrc/b.test.ts:1: test\n".to_string(),
+            elapsed_ms: 12,
+        });
+
+        assert_eq!(
+            display,
+            CompactToolDisplay {
+                title: "Search(pattern: \"**/*.test.{js,ts,jsx,tsx}\")".to_string(),
+                detail: Some("Found 2 matches".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn formats_bash_completion_as_compact_row() {
+        let display = compact_tool_display(&ToolObservation {
+            name: "run_command".to_string(),
+            args: json!({ "command": "cargo check" }),
+            status: ToolStatus::Success,
+            output: "Finished dev profile".to_string(),
+            elapsed_ms: 42,
+        });
+
+        assert_eq!(
+            display,
+            CompactToolDisplay {
+                title: "Bash(cargo check)".to_string(),
+                detail: Some("Completed in 42ms".to_string()),
+            }
+        );
     }
 }
 
@@ -436,7 +486,7 @@ async fn print_welcome(
     print_intro(
         terminal,
         &client.config().model,
-        &account.display_value(),
+        account.plan_value(),
         &session.cwd().display().to_string(),
     );
 }
@@ -466,20 +516,22 @@ fn print_help(terminal: &Terminal) {
 }
 
 fn print_observation(terminal: &Terminal, observation: &ToolObservation) {
-    let status = match observation.status {
-        ToolStatus::Success => "ok",
-        ToolStatus::Failed => "failed",
-        ToolStatus::Denied => "denied",
+    let display = compact_tool_display(observation);
+    let dot = match observation.status {
+        ToolStatus::Success => terminal.success("●"),
+        ToolStatus::Failed | ToolStatus::Denied => terminal.warn("●"),
     };
-    let title = format!(
-        "tool {status}: {} ({}ms)",
-        observation.name, observation.elapsed_ms
-    );
-    let colored_title = match observation.status {
-        ToolStatus::Success => terminal.success(&title),
-        ToolStatus::Failed | ToolStatus::Denied => terminal.warn(&title),
+    let title = match observation.status {
+        ToolStatus::Success => terminal.title(&display.title),
+        ToolStatus::Failed | ToolStatus::Denied => terminal.warn(&display.title),
     };
-    print_output_panel(terminal, &title, &colored_title, observation.output.trim());
+
+    println!();
+    println!("{} {}", dot, title);
+    if let Some(detail) = display.detail {
+        println!("  {} {}", terminal.muted("└"), detail);
+    }
+
     let _ = telemetry::record(
         "codeus.tool.observed",
         serde_json::json!({
@@ -491,12 +543,152 @@ fn print_observation(terminal: &Terminal, observation: &ToolObservation) {
     );
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CompactToolDisplay {
+    title: String,
+    detail: Option<String>,
+}
+
+fn compact_tool_display(observation: &ToolObservation) -> CompactToolDisplay {
+    let title = match observation.name.as_str() {
+        "read_file" => format!(
+            "Read({})",
+            string_arg(&observation.args, "path").unwrap_or("?")
+        ),
+        "search_text" => format!(
+            "Search(pattern: {})",
+            quoted_arg(&observation.args, "pattern").unwrap_or_else(|| "\"?\"".to_string())
+        ),
+        "list_files" => {
+            let path = string_arg(&observation.args, "path")
+                .or_else(|| string_arg(&observation.args, "root"))
+                .unwrap_or(".");
+            format!("List({path})")
+        }
+        "replace_in_file" => format!(
+            "Edit({})",
+            string_arg(&observation.args, "path").unwrap_or("?")
+        ),
+        "apply_patch" => {
+            let count = observation
+                .args
+                .get("operation_count")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            format!("Edit({count} operations)")
+        }
+        "run_command" => format!(
+            "Bash({})",
+            string_arg(&observation.args, "command").unwrap_or("?")
+        ),
+        other => format!("Tool({other})"),
+    };
+
+    let detail = match observation.status {
+        ToolStatus::Success => success_tool_detail(observation),
+        ToolStatus::Failed => Some(failure_tool_detail("Failed", observation)),
+        ToolStatus::Denied => Some(failure_tool_detail("Denied", observation)),
+    };
+
+    CompactToolDisplay { title, detail }
+}
+
+fn success_tool_detail(observation: &ToolObservation) -> Option<String> {
+    match observation.name.as_str() {
+        "read_file" => Some(format!("Read {} lines", count_lines(&observation.output))),
+        "search_text" => {
+            let matches = count_result_lines(&observation.output);
+            if matches == 0 {
+                Some("No matches".to_string())
+            } else {
+                Some(format!("Found {matches} matches"))
+            }
+        }
+        "list_files" => {
+            let files = count_result_lines(&observation.output);
+            if files == 0 {
+                Some("No files found".to_string())
+            } else {
+                Some(format!("Found {files} files"))
+            }
+        }
+        "replace_in_file" | "apply_patch" => first_output_line(&observation.output),
+        "run_command" => Some(format!("Completed in {}ms", observation.elapsed_ms)),
+        _ => first_output_line(&observation.output),
+    }
+}
+
+fn failure_tool_detail(label: &str, observation: &ToolObservation) -> String {
+    match first_output_line(&observation.output) {
+        Some(line) => format!("{label}: {line}"),
+        None => format!("{label} in {}ms", observation.elapsed_ms),
+    }
+}
+
+fn string_arg<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    value.get(key).and_then(serde_json::Value::as_str)
+}
+
+fn quoted_arg(value: &serde_json::Value, key: &str) -> Option<String> {
+    string_arg(value, key).map(|value| format!("{value:?}"))
+}
+
+fn count_lines(output: &str) -> usize {
+    output.lines().count()
+}
+
+fn count_result_lines(output: &str) -> usize {
+    output
+        .lines()
+        .map(str::trim)
+        .filter(|line| {
+            !line.is_empty()
+                && !line.starts_with('[')
+                && *line != "No matches."
+                && *line != "No files found."
+        })
+        .count()
+}
+
+fn first_output_line(output: &str) -> Option<String> {
+    output
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|line| {
+            const MAX_SUMMARY_CHARS: usize = 120;
+            let mut summary = line.chars().take(MAX_SUMMARY_CHARS).collect::<String>();
+            if line.chars().count() > MAX_SUMMARY_CHARS {
+                summary.push_str("...");
+            }
+            summary
+        })
+}
+
 fn show_status(_client: &CodeusClient, session: &Session, account: &AccountSummary) -> Result<()> {
     input::show_status_view(&status_rows(account, session))
 }
 
 fn print_swap_helper(terminal: &Terminal, args: &str) {
     if args != "acknowledge" {
+        if let Some(plan) = args.strip_prefix("acknowledge plan ") {
+            match crate::swaps::SwapIntent::parse(plan) {
+                Ok(intent) => {
+                    println!("{}", terminal.accent("Mira swap handoff"));
+                    println!(
+                        "{} Financial risk acknowledged for planning only. No quote, transaction, or wallet action has been executed.",
+                        terminal.warn("•")
+                    );
+                    println!();
+                    println!("{}", intent.mira_handoff_prompt());
+                }
+                Err(error) => {
+                    println!("{} {error}", terminal.warn("•"));
+                }
+            }
+            return;
+        }
+
         println!("{}", terminal.accent("Omniston v1beta8 swap helper"));
         println!(
             "{} Financial risk: swap software can lose funds through bugs, bad inputs, failed transactions, or misuse.",
@@ -504,6 +696,10 @@ fn print_swap_helper(terminal: &Terminal, args: &str) {
         );
         println!(
             "{} Type `/swap acknowledge` to confirm you understand this risk and view v1beta8 integration guidance.",
+            terminal.muted("•")
+        );
+        println!(
+            "{} Then plan a Mira handoff with `/swap acknowledge plan <amount> <from_asset> to <to_asset>`.",
             terminal.muted("•")
         );
         return;
@@ -520,6 +716,7 @@ fn print_swap_helper(terminal: &Terminal, args: &str) {
     println!("  • Track submitted trades by quote ID, trader address, and the outgoing transaction query/hash until a terminal state.");
     println!();
     println!("{}", terminal.accent("Mira handoff"));
+    println!("  • Plan a route with `/swap acknowledge plan <amount> <from_asset> to <to_asset>`.");
     println!(
         "  • Send Mira a concise intent: `Quote, explain, and risk-check this Omniston v1beta8 route: <input asset/amount/source chain> to <output asset/destination chain>. Do not execute without explicit wallet confirmation.`"
     );
@@ -548,6 +745,10 @@ impl AccountSummary {
             Some(email) => format!("{} · {}", self.plan, email),
             None => self.plan.clone(),
         }
+    }
+
+    fn plan_value(&self) -> &str {
+        &self.plan
     }
 }
 
@@ -765,49 +966,4 @@ fn print_intro(terminal: &Terminal, model: &str, subscription: &str, cwd: &str) 
     }
     println!();
     println!();
-}
-
-fn print_output_panel(terminal: &Terminal, plain_title: &str, colored_title: &str, output: &str) {
-    const WIDTH: usize = 76;
-    let title_width = plain_title.chars().count();
-    let remaining = WIDTH.saturating_sub(title_width + 2);
-    println!();
-    println!(
-        "{} {} {}",
-        terminal.accent("┌"),
-        colored_title,
-        terminal.accent(&format!("{}┐", "─".repeat(remaining)))
-    );
-    print_panel_line(terminal, WIDTH, "");
-
-    if output.is_empty() {
-        print_panel_line(terminal, WIDTH, "");
-    } else {
-        for line in output.lines().take(18) {
-            print_panel_line(terminal, WIDTH, line);
-        }
-        if output.lines().count() > 18 {
-            print_panel_line(
-                terminal,
-                WIDTH,
-                "[truncated in terminal view; full output is saved in thread context]",
-            );
-        }
-    }
-
-    print_panel_line(terminal, WIDTH, "");
-    println!("{}", terminal.accent(&format!("└{}┘", "─".repeat(WIDTH))));
-    println!();
-}
-
-fn print_panel_line(terminal: &Terminal, width: usize, value: &str) {
-    let visible: String = value.chars().take(width.saturating_sub(2)).collect();
-    let padding = width.saturating_sub(visible.chars().count() + 2);
-    println!(
-        "{} {}{} {}",
-        terminal.accent("│"),
-        visible,
-        " ".repeat(padding),
-        terminal.accent("│")
-    );
 }

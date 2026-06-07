@@ -22,18 +22,14 @@ pub async fn login_with_token(token: String) -> Result<()> {
 }
 
 pub async fn login_with_browser(
-    api_base: Option<String>,
-    model: Option<String>,
+    _api_base: Option<String>,
+    _model: Option<String>,
     stored: &Config,
     no_browser: bool,
 ) -> Result<Config> {
     let auth_client = CodeusClient::new(ClientConfig {
-        api_base: api_base
-            .or_else(|| stored.api_base.clone())
-            .unwrap_or_else(|| DEFAULT_API_BASE.to_string()),
-        model: model
-            .or_else(|| stored.model.clone())
-            .unwrap_or_else(|| DEFAULT_MODEL.to_string()),
+        api_base: DEFAULT_API_BASE.to_string(),
+        model: DEFAULT_MODEL.to_string(),
         token: None,
     })?;
 
@@ -48,18 +44,14 @@ pub async fn login_with_browser(
 }
 
 pub async fn refresh_session(
-    api_base: Option<String>,
-    model: Option<String>,
+    _api_base: Option<String>,
+    _model: Option<String>,
     config: &mut Config,
     refresh_token: &str,
 ) -> Result<String> {
     let client = CodeusClient::new(ClientConfig {
-        api_base: api_base
-            .or_else(|| config.api_base.clone())
-            .unwrap_or_else(|| DEFAULT_API_BASE.to_string()),
-        model: model
-            .or_else(|| config.model.clone())
-            .unwrap_or_else(|| DEFAULT_MODEL.to_string()),
+        api_base: DEFAULT_API_BASE.to_string(),
+        model: DEFAULT_MODEL.to_string(),
         token: None,
     })?;
 
@@ -154,7 +146,7 @@ async fn wait_for_device_token(
 
     loop {
         if tokio::time::Instant::now() >= deadline {
-            bail!("browser login expired; run `codeus login` to try again");
+            bail!("browser login expired; run `codeus` to try again");
         }
 
         handle_wait_key(url)?;
@@ -166,7 +158,7 @@ async fn wait_for_device_token(
                 DeviceTokenStatus::SlowDown => interval += Duration::from_secs(5),
                 DeviceTokenStatus::Denied(message) => bail!("browser login was denied: {message}"),
                 DeviceTokenStatus::Expired => {
-                    bail!("browser login expired; run `codeus login` again")
+                    bail!("browser login expired; run `codeus` again")
                 }
             }
             next_poll = tokio::time::Instant::now() + interval;

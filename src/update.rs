@@ -54,7 +54,7 @@ pub async fn maybe_print_update_notice(config: &Config) {
         env!("CARGO_PKG_VERSION"),
         release.version
     );
-    println!("Run `codeus update` for the right install command.");
+    println!("Use your install channel's update command to upgrade.");
     if let Some(url) = release.notes_url.as_deref().or(release.url.as_deref()) {
         println!("Release notes: {url}");
     }

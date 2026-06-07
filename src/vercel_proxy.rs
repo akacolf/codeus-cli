@@ -33,6 +33,19 @@ struct UpstreamText {
     text: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ChatAuth {
+    ServerToken(String),
+    UserBearer,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ChatUpstream {
+    name: &'static str,
+    url: String,
+    auth: ChatAuth,
+}
+
 pub async fn chat_completions(request: Request) -> Response<Body> {
     respond(chat_completions_inner(request).await)
 }
@@ -70,30 +83,8 @@ pub async fn fallback() -> Response<Body> {
 async fn chat_completions_inner(request: Request) -> Result<Response<Body>, ProxyError> {
     let user_token = bearer_token(&request);
     let body = read_json(request).await?;
-    let chat_url = configured_url(
-        "CODEUS_CHAT_COMPLETIONS_URL",
-        "CODEUS_CHAT_BASE",
-        "chat/completions",
-    )?;
-    let server_token = optional_env("CODEUS_CHAT_API_KEY");
-    let mut builder = reqwest::Client::new()
-        .post(chat_url)
-        .header(header::CONTENT_TYPE.as_str(), "application/json");
-
-    if let Some(server_token) = server_token {
-        builder = builder.bearer_auth(server_token);
-        if let Some(user_token) = user_token {
-            builder = builder.header("x-codeus-session-token", user_token);
-        }
-    } else if let Some(user_token) = user_token {
-        builder = builder.bearer_auth(user_token);
-    }
-
-    let response = builder
-        .json(&body)
-        .send()
-        .await
-        .map_err(upstream_request_error)?;
+    let upstreams = chat_upstream_candidates(user_token.is_some())?;
+    let response = post_chat_with_fallback(upstreams, user_token, body).await?;
 
     Ok(proxy_response(response))
 }
@@ -292,6 +283,66 @@ async fn post_json_with_404_fallback(
     ))
 }
 
+async fn post_chat_with_fallback(
+    upstreams: Vec<ChatUpstream>,
+    user_token: Option<String>,
+    body: Value,
+) -> Result<reqwest::Response, ProxyError> {
+    let client = reqwest::Client::new();
+    let last_index = upstreams.len().saturating_sub(1);
+    let mut last_failure = None;
+
+    for (index, upstream) in upstreams.into_iter().enumerate() {
+        let mut builder = client
+            .post(&upstream.url)
+            .header(header::CONTENT_TYPE.as_str(), "application/json");
+
+        match &upstream.auth {
+            ChatAuth::ServerToken(token) => {
+                builder = builder.bearer_auth(token);
+                if let Some(user_token) = user_token.as_ref() {
+                    builder = builder.header("x-codeus-session-token", user_token);
+                }
+            }
+            ChatAuth::UserBearer => {
+                if let Some(user_token) = user_token.as_ref() {
+                    builder = builder.bearer_auth(user_token);
+                }
+            }
+        }
+
+        let response = match builder.json(&body).send().await {
+            Ok(response) => response,
+            Err(error) if index < last_index => {
+                last_failure = Some(format!("{} request failed: {error}", upstream.name));
+                continue;
+            }
+            Err(error) => return Err(upstream_request_error(error)),
+        };
+
+        if response.status().is_success()
+            || index == last_index
+            || !should_fallback_chat_status(response.status())
+        {
+            return Ok(response);
+        }
+
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        last_failure = Some(format!(
+            "{} returned {status}: {}",
+            upstream.name,
+            text.trim()
+        ));
+    }
+
+    Err(ProxyError::new(
+        StatusCode::BAD_GATEWAY,
+        "upstream_request_failed",
+        last_failure.unwrap_or_else(|| "No chat upstreams were available.".to_string()),
+    ))
+}
+
 async fn proxy_get(url: String, token: String) -> Result<Response<Body>, ProxyError> {
     let response = reqwest::Client::new()
         .get(url)
@@ -381,19 +432,6 @@ fn optional_env(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn configured_url(
-    override_name: &str,
-    base_name: &'static str,
-    path: &str,
-) -> Result<String, ProxyError> {
-    if let Some(url) = optional_env(override_name) {
-        return Ok(url);
-    }
-
-    let base = require_env(base_name)?;
-    Ok(upstream_url(&base, path))
-}
-
 fn configured_url_candidates(
     override_name: &str,
     base_name: &'static str,
@@ -405,6 +443,65 @@ fn configured_url_candidates(
 
     let base = require_env(base_name)?;
     Ok(paths.iter().map(|path| upstream_url(&base, path)).collect())
+}
+
+fn chat_upstream_candidates(user_token_available: bool) -> Result<Vec<ChatUpstream>, ProxyError> {
+    chat_upstream_candidates_from_lookup(user_token_available, optional_env)
+}
+
+fn chat_upstream_candidates_from_lookup<F>(
+    user_token_available: bool,
+    mut lookup: F,
+) -> Result<Vec<ChatUpstream>, ProxyError>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    let mut candidates = Vec::new();
+
+    let vercel_token = lookup("AI_GATEWAY_API_KEY").or_else(|| lookup("VERCEL_OIDC_TOKEN"));
+    if let Some(token) = vercel_token {
+        let url = lookup("CODEUS_VERCEL_AI_GATEWAY_CHAT_COMPLETIONS_URL").unwrap_or_else(|| {
+            upstream_url(
+                &lookup("CODEUS_VERCEL_AI_GATEWAY_BASE")
+                    .or_else(|| lookup("AI_GATEWAY_BASE_URL"))
+                    .unwrap_or_else(|| "https://ai-gateway.vercel.sh/v1".to_string()),
+                "chat/completions",
+            )
+        });
+        candidates.push(ChatUpstream {
+            name: "vercel_ai_gateway",
+            url,
+            auth: ChatAuth::ServerToken(token),
+        });
+    }
+
+    if let Some(url) = lookup("CODEUS_CHAT_COMPLETIONS_URL")
+        .or_else(|| lookup("CODEUS_CHAT_BASE").map(|base| upstream_url(&base, "chat/completions")))
+    {
+        let auth = lookup("CODEUS_CHAT_API_KEY")
+            .map(ChatAuth::ServerToken)
+            .unwrap_or(ChatAuth::UserBearer);
+        candidates.push(ChatUpstream {
+            name: "llm_gateway",
+            url,
+            auth,
+        });
+    }
+
+    if candidates.is_empty() {
+        let detail = if user_token_available {
+            "A user session token is present, but no OpenAI-compatible chat gateway URL is configured."
+        } else {
+            "No user session token or OpenAI-compatible chat gateway URL is configured."
+        };
+        return Err(ProxyError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "missing_server_config",
+            format!("{detail} Configure AI_GATEWAY_API_KEY/VERCEL_OIDC_TOKEN for Vercel AI Gateway or CODEUS_CHAT_BASE/CODEUS_CHAT_COMPLETIONS_URL for the LLM gateway."),
+        ));
+    }
+
+    Ok(candidates)
 }
 
 fn configured_account_url(override_name: &str, path: &str) -> Result<String, ProxyError> {
@@ -473,6 +570,10 @@ fn status_code(status: reqwest::StatusCode) -> StatusCode {
     StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY)
 }
 
+fn should_fallback_chat_status(status: reqwest::StatusCode) -> bool {
+    matches!(status.as_u16(), 402 | 408 | 409 | 425 | 429 | 500..=599)
+}
+
 fn upstream_request_error(error: reqwest::Error) -> ProxyError {
     ProxyError::new(
         StatusCode::BAD_GATEWAY,
@@ -526,4 +627,75 @@ fn internal_error(message: &'static str) -> Response<Body> {
             .to_string(),
         ))
         .expect("static internal error response should be valid")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn chat_upstreams_prefer_vercel_then_llm_gateway() {
+        let env = HashMap::from([
+            ("AI_GATEWAY_API_KEY", "vercel-key"),
+            ("CODEUS_CHAT_BASE", "https://llm.example/v1"),
+            ("CODEUS_CHAT_API_KEY", "llm-key"),
+        ]);
+
+        let candidates = chat_upstream_candidates_from_lookup(false, |key| {
+            env.get(key).map(|value| value.to_string())
+        })
+        .unwrap();
+
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].name, "vercel_ai_gateway");
+        assert_eq!(
+            candidates[0].url,
+            "https://ai-gateway.vercel.sh/v1/chat/completions"
+        );
+        assert_eq!(
+            candidates[0].auth,
+            ChatAuth::ServerToken("vercel-key".to_string())
+        );
+        assert_eq!(candidates[1].name, "llm_gateway");
+        assert_eq!(candidates[1].url, "https://llm.example/v1/chat/completions");
+        assert_eq!(
+            candidates[1].auth,
+            ChatAuth::ServerToken("llm-key".to_string())
+        );
+    }
+
+    #[test]
+    fn chat_upstreams_keep_existing_llm_gateway_without_vercel_key() {
+        let env = HashMap::from([("CODEUS_CHAT_COMPLETIONS_URL", "https://llm.example/chat")]);
+
+        let candidates = chat_upstream_candidates_from_lookup(true, |key| {
+            env.get(key).map(|value| value.to_string())
+        })
+        .unwrap();
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].name, "llm_gateway");
+        assert_eq!(candidates[0].url, "https://llm.example/chat");
+        assert_eq!(candidates[0].auth, ChatAuth::UserBearer);
+    }
+
+    #[test]
+    fn fallback_statuses_cover_credit_and_rate_limit_failures() {
+        assert!(should_fallback_chat_status(
+            reqwest::StatusCode::PAYMENT_REQUIRED
+        ));
+        assert!(should_fallback_chat_status(
+            reqwest::StatusCode::TOO_MANY_REQUESTS
+        ));
+        assert!(should_fallback_chat_status(
+            reqwest::StatusCode::BAD_GATEWAY
+        ));
+        assert!(!should_fallback_chat_status(
+            reqwest::StatusCode::BAD_REQUEST
+        ));
+        assert!(!should_fallback_chat_status(
+            reqwest::StatusCode::UNAUTHORIZED
+        ));
+    }
 }
