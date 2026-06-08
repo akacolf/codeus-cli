@@ -70,6 +70,10 @@ pub async fn usage(request: Request) -> Response<Body> {
     respond(usage_inner(request).await)
 }
 
+pub async fn signout(request: Request) -> Response<Body> {
+    respond(signout_inner(request).await)
+}
+
 pub async fn fallback() -> Response<Body> {
     json_response(
         StatusCode::NOT_FOUND,
@@ -211,7 +215,8 @@ async fn refresh_inner(request: Request) -> Result<Response<Body>, ProxyError> {
 }
 
 async fn account_inner(request: Request) -> Result<Response<Body>, ProxyError> {
-    let account_url = configured_account_url("CODEUS_ACCOUNT_URL", "account")?;
+    // Default to auth/whoami — the website's actual account-info endpoint.
+    let account_url = configured_account_url("CODEUS_ACCOUNT_URL", "auth/whoami")?;
     let token = bearer_token(&request).ok_or_else(|| {
         ProxyError::new(
             StatusCode::UNAUTHORIZED,
@@ -224,7 +229,8 @@ async fn account_inner(request: Request) -> Result<Response<Body>, ProxyError> {
 }
 
 async fn usage_inner(request: Request) -> Result<Response<Body>, ProxyError> {
-    let usage_url = configured_account_url("CODEUS_USAGE_URL", "usage")?;
+    // Default to balance — the website's actual usage/balance endpoint.
+    let usage_url = configured_account_url("CODEUS_USAGE_URL", "balance")?;
     let token = bearer_token(&request).ok_or_else(|| {
         ProxyError::new(
             StatusCode::UNAUTHORIZED,
@@ -234,6 +240,25 @@ async fn usage_inner(request: Request) -> Result<Response<Body>, ProxyError> {
     })?;
 
     proxy_get(usage_url, token).await
+}
+
+async fn signout_inner(request: Request) -> Result<Response<Body>, ProxyError> {
+    let signout_url = configured_account_url("CODEUS_SIGNOUT_URL", "auth/signout")?;
+    let token = bearer_token(&request);
+
+    let mut builder = reqwest::Client::new()
+        .post(&signout_url)
+        .header(reqwest::header::CONTENT_TYPE, "application/json");
+    if let Some(token) = token {
+        builder = builder.bearer_auth(token);
+    }
+    let response = builder
+        .body("{}")
+        .send()
+        .await
+        .map_err(upstream_request_error)?;
+
+    Ok(proxy_response(response))
 }
 
 async fn proxy_json_post_candidates(

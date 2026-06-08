@@ -22,6 +22,10 @@
       "destination": "/api/index"
     },
     {
+      "source": "/balance",
+      "destination": "/api/index"
+    },
+    {
       "source": "/usage",
       "destination": "/api/index"
     }

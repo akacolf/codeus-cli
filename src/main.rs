@@ -34,7 +34,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[derive(Debug, Parser)]
 #[command(name = "codeus")]
 #[command(author, version, about = "Terminal-native QC Codeus")]
-struct Cli {}
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
 
 #[derive(Debug, Clone)]
 struct GlobalOptions {
@@ -135,7 +138,7 @@ enum ConfigCommand {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
-    let _cli = Cli::parse();
+    let cli = Cli::parse();
     let stored = Config::load()?;
     let globals = GlobalOptions {
         api_base: None,
@@ -146,9 +149,40 @@ async fn main() -> Result<()> {
         approval_mode: None,
     };
 
-    let stored = maybe_onboard(&globals, stored, None).await?;
-    update::maybe_print_update_notice(&stored).await;
-    repl::run(client_from(&globals, &stored, None, AuthMode::Passive).await?).await
+    match cli.command {
+        None | Some(Command::Chat(_)) => {
+            // No subcommand or explicit `chat` → run the interactive REPL.
+            let stored = maybe_onboard(&globals, stored, None).await?;
+            update::maybe_print_update_notice(&stored).await;
+            repl::run(client_from(&globals, &stored, None, AuthMode::Passive).await?).await
+        }
+        Some(Command::Run(args)) => {
+            let stored = maybe_onboard(&globals, stored, args.model.clone()).await?;
+            let client =
+                client_from(&globals, &stored, args.model.clone(), AuthMode::Required).await?;
+            run_prompt(client, args.prompt, args.cwd, OutputFormat::Text).await
+        }
+        Some(Command::Login(args)) => login(args).await,
+        Some(Command::Logout) => logout(&stored).await,
+        Some(Command::Account) => {
+            let client =
+                client_from(&globals, &stored, None, AuthMode::Required).await?;
+            account_command(&client, OutputFormat::Text).await
+        }
+        Some(Command::Usage) => {
+            let client =
+                client_from(&globals, &stored, None, AuthMode::Required).await?;
+            usage_command(&client, OutputFormat::Text).await
+        }
+        Some(Command::Doctor) => doctor_command(&globals, &stored, OutputFormat::Text).await,
+        Some(Command::Harness) => harness_command(&stored, OutputFormat::Text),
+        Some(Command::Status) => status_command(&globals, &stored, OutputFormat::Text),
+        Some(Command::State) => state_command(OutputFormat::Text),
+        Some(Command::Update) => update::run_update().await,
+        Some(Command::Config { command }) => {
+            config_command(command, stored, OutputFormat::Text)
+        }
+    }
 }
 
 async fn run_prompt(
@@ -300,7 +334,24 @@ async fn login(args: LoginArgs) -> Result<()> {
     Ok(())
 }
 
-fn logout() -> Result<()> {
+async fn logout(stored: &Config) -> Result<()> {
+    // Best-effort server-side revocation — ignore errors so a network glitch
+    // can never block local logout.
+    if let Some(token) = stored
+        .session_token
+        .clone()
+        .filter(|t| !t.trim().is_empty())
+    {
+        let config = ClientConfig {
+            api_base: DEFAULT_API_BASE.to_string(),
+            model: DEFAULT_MODEL.to_string(),
+            token: Some(token),
+        };
+        if let Ok(client) = CodeusClient::new(config) {
+            let _ = client.signout().await;
+        }
+    }
+
     let mut config = Config::load()?;
     config.session_token = None;
     config.refresh_token = None;

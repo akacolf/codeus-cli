@@ -361,13 +361,30 @@ impl CodeusClient {
     }
 
     pub async fn account(&self) -> Result<Value> {
-        self.get_json_from_candidates(&["auth/whoami", "account", "me", "auth/session"])
+        // /auth/whoami is the canonical account-info endpoint on the website.
+        // Keep legacy aliases as fallbacks so old server deployments still work.
+        self.get_json_from_candidates(&["auth/whoami", "account", "me"])
             .await
     }
 
     pub async fn usage(&self) -> Result<Value> {
-        self.get_json_from_candidates(&["balance", "usage", "account/usage"])
+        // /balance is the canonical usage endpoint on the website.
+        self.get_json_from_candidates(&["balance", "usage"])
             .await
+    }
+
+    /// Revoke the session token server-side. Best-effort — errors are ignored
+    /// so a network glitch can't block local logout.
+    pub async fn signout(&self) -> Result<()> {
+        let url = self.url("auth/signout");
+        let _response = self
+            .http
+            .post(&url)
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .context("signout request failed")?;
+        Ok(())
     }
 
     fn url(&self, path: &str) -> String {
@@ -383,10 +400,17 @@ impl CodeusClient {
         for path in paths {
             match self.get_json(path).await {
                 Ok(value) => return Ok(value),
-                Err(error) => last_error = Some(error),
+                Err(error) => {
+                    // A 401 means the session token is invalid/expired — no
+                    // point trying other paths with the same dead credentials.
+                    let msg = error.to_string();
+                    if msg.contains("not signed in") || msg.contains("401") {
+                        return Err(error);
+                    }
+                    last_error = Some(error);
+                }
             }
         }
-
         Err(last_error.unwrap_or_else(|| anyhow!("no API paths configured")))
     }
 
