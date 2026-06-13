@@ -1,4 +1,4 @@
-use crate::api::CodeusClient;
+use crate::api::{ClientConfig, CodeusClient};
 use crate::approval::ApprovalEngine;
 use crate::config::Config;
 use crate::harness::Session;
@@ -150,7 +150,9 @@ pub async fn run(mut client: CodeusClient) -> Result<()> {
             );
         }
 
-        run_agent_turn(&client, &terminal, &mut session, &input).await?;
+        if let Err(error) = run_agent_turn(&client, &terminal, &mut session, &input).await {
+            print_turn_error(&terminal, &error);
+        }
     }
 
     Ok(())
@@ -456,11 +458,7 @@ async fn handle_command(
             Ok(CommandResult::Continue)
         }
         "/logout" | "/signout" => {
-            logout_current_session(client, account).await?;
-            println!(
-                "{}",
-                terminal.success("Signed out. Run `codeus` again to connect another account.")
-            );
+            logout_current_session(terminal, client, account).await?;
             Ok(CommandResult::Continue)
         }
         "/resume" => {
@@ -723,7 +721,11 @@ fn show_status(client: &CodeusClient, session: &Session, account: &AccountSummar
     input::show_status_view(&status_rows(account, session, &client.config().model))
 }
 
-async fn logout_current_session(client: &CodeusClient, account: &mut AccountSummary) -> Result<()> {
+async fn logout_current_session(
+    terminal: &Terminal,
+    client: &mut CodeusClient,
+    account: &mut AccountSummary,
+) -> Result<()> {
     let _ = client.signout().await;
 
     let mut config = Config::load()?;
@@ -733,7 +735,23 @@ async fn logout_current_session(client: &CodeusClient, account: &mut AccountSumm
     config.onboarded = Some(false);
     config.save()?;
     *account = AccountSummary::signed_out();
+
+    let model = client.config().model.clone();
+    let signed_in = onboarding::run(None, Some(model.clone()), config).await?;
+    *client = CodeusClient::new(ClientConfig {
+        api_base: crate::config::effective_api_base(None, &signed_in),
+        model: crate::config::effective_model(Some(model), &signed_in),
+        token: crate::config::effective_session_token(None, &signed_in),
+    })?;
+    *account = account_summary(client).await;
+    println!("{}", terminal.success("Signed in. Back in the harness."));
     Ok(())
+}
+
+fn print_turn_error(terminal: &Terminal, error: &anyhow::Error) {
+    println!();
+    println!("{} {}", terminal.warn("●"), terminal.warn("Error"));
+    println!("  {} {}", terminal.muted("└"), error);
 }
 
 fn print_swap_helper(terminal: &Terminal, args: &str) {
@@ -1151,8 +1169,36 @@ fn prompt(
         help_rows: command_help_rows(),
         status_rows: status_rows(account, session, model),
         prompt_suggestions: prompt_suggestions(session),
+        footer_left: workspace_footer(session),
+        footer_right: "○ /help for commands".to_string(),
     };
     (terminal.composer_prompt(), 2, chrome)
+}
+
+fn workspace_footer(session: &Session) -> String {
+    let cwd = session.cwd();
+    let name = cwd
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("project");
+    let branch = git_branch(cwd)
+        .map(|branch| format!(" ({branch})"))
+        .unwrap_or_default();
+    format!("{name}{branch}")
+}
+
+fn git_branch(cwd: &std::path::Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .arg("branch")
+        .arg("--show-current")
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!branch.is_empty()).then_some(branch)
 }
 
 fn status_rows(account: &AccountSummary, session: &Session, model: &str) -> Vec<input::StatusRow> {

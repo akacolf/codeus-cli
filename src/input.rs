@@ -5,7 +5,7 @@ const DEFAULT_COMPOSER_WIDTH: usize = 120;
 const COMMAND_COLUMN_WIDTH: usize = 18;
 const MAX_MENU_ROWS: usize = 5;
 const COMPOSER_SAFE_AREA_LINES: usize = 2;
-const COMPOSER_BAND_LINES: usize = 3;
+const COMPOSER_BAND_LINES: usize = 4;
 const COMPOSER_INPUT_LINE_OFFSET: usize = 1;
 const ACTIVE_COLOR: &str = "\x1b[1m\x1b[38;2;0;168;204m";
 const COMPOSER_RULE_COLOR: &str = "\x1b[38;2;82;82;82m";
@@ -21,6 +21,8 @@ pub struct ComposerChrome {
     pub help_rows: Vec<HelpRow>,
     pub status_rows: Vec<StatusRow>,
     pub prompt_suggestions: Vec<String>,
+    pub footer_left: String,
+    pub footer_right: String,
 }
 
 #[derive(Clone)]
@@ -230,9 +232,7 @@ fn read_interactive_line(
                         continue;
                     }
                     clear_composer_area(chrome.is_some());
-                    if let Some(chrome) = chrome {
-                        render_static_composer(prompt, &line, chrome)?;
-                    } else {
+                    if chrome.is_none() {
                         print!("{prompt}{line}\x1b[0m\r\n");
                     }
                     io::stdout().flush()?;
@@ -292,9 +292,7 @@ fn read_interactive_line(
                     continue;
                 }
                 clear_composer_area(chrome.is_some());
-                if let Some(chrome) = chrome {
-                    render_static_composer(prompt, &line, chrome)?;
-                } else {
+                if chrome.is_none() {
                     print!("{prompt}{line}\x1b[0m\r\n");
                 }
                 io::stdout().flush()?;
@@ -555,7 +553,7 @@ fn render_prompt(args: RenderPromptArgs<'_, '_, '_>) -> Result<()> {
     }
 
     let input_lines = if chrome.is_some() {
-        render_input_band(prompt, &display_input, line_width);
+        render_input_band(prompt, &display_input, line_width, chrome);
         COMPOSER_BAND_LINES
     } else {
         print!("{prompt}{display_input}{}\x1b[0m", " ".repeat(padding));
@@ -607,9 +605,9 @@ fn render_prompt(args: RenderPromptArgs<'_, '_, '_>) -> Result<()> {
     Ok(())
 }
 
-fn render_static_composer(prompt: &str, line: &str, _chrome: &ComposerChrome) -> Result<()> {
+fn render_static_composer(prompt: &str, line: &str, chrome: &ComposerChrome) -> Result<()> {
     let line_width = composer_draw_width(terminal_width().unwrap_or(DEFAULT_COMPOSER_WIDTH));
-    render_input_band(prompt, line, line_width);
+    render_input_band(prompt, line, line_width, Some(chrome));
     io::stdout().flush()?;
     Ok(())
 }
@@ -625,16 +623,27 @@ fn clear_composer_area(has_chrome: bool) {
     }
 }
 
-fn render_input_band(prompt: &str, input_text: &str, width: usize) {
-    print!("{}", input_band(prompt, input_text, width));
+fn render_input_band(
+    prompt: &str,
+    input_text: &str,
+    width: usize,
+    chrome: Option<&ComposerChrome>,
+) {
+    print!("{}", input_band(prompt, input_text, width, chrome));
 }
 
-fn input_band(prompt: &str, input_text: &str, width: usize) -> String {
+fn input_band(
+    prompt: &str,
+    input_text: &str,
+    width: usize,
+    chrome: Option<&ComposerChrome>,
+) -> String {
     format!(
-        "{}{}{}",
+        "{}{}{}{}",
         composer_rule(width),
         input_line(prompt, input_text, width),
-        composer_rule(width)
+        composer_rule(width),
+        composer_footer(width, chrome)
     )
 }
 
@@ -650,6 +659,34 @@ fn composer_rule(width: usize) -> String {
 fn input_line(prompt: &str, input_text: &str, width: usize) -> String {
     let input_text = truncate_visible(input_text, width.saturating_sub(visible_chars(prompt)));
     format!("{prompt}{input_text}\x1b[K\x1b[0m\r\n")
+}
+
+fn composer_footer(width: usize, chrome: Option<&ComposerChrome>) -> String {
+    let left = chrome
+        .map(|chrome| chrome.footer_left.as_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("project");
+    let right = chrome
+        .map(|chrome| chrome.footer_right.as_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("○ /help for commands");
+    let left_width = visible_chars(left);
+    let right_width = visible_chars(right);
+    let gap = width.saturating_sub(left_width + right_width);
+
+    if color_enabled() {
+        format!(
+            "  \x1b[2m{left}\x1b[0m{}{}\x1b[0m\r\n",
+            " ".repeat(gap.saturating_sub(2)),
+            dim(right)
+        )
+    } else {
+        format!("  {left}{}{}\r\n", " ".repeat(gap.saturating_sub(2)), right)
+    }
+}
+
+fn dim(value: &str) -> String {
+    format!("\x1b[2m{value}\x1b[0m")
 }
 
 fn composer_draw_width(terminal_width: usize) -> usize {
@@ -1236,6 +1273,8 @@ mod tests {
                 "Write tests for @filename".to_string(),
                 "Review this repo".to_string(),
             ],
+            footer_left: String::new(),
+            footer_right: String::new(),
         };
 
         let suggestion = matching_prompt_suggestion(&[], Some(&chrome));
@@ -1253,6 +1292,8 @@ mod tests {
                 "Build an Omniston v1beta8 quote flow".to_string(),
                 "Review this repo".to_string(),
             ],
+            footer_left: String::new(),
+            footer_right: String::new(),
         };
         let input = "build an".chars().collect::<Vec<_>>();
 
@@ -1268,6 +1309,8 @@ mod tests {
             help_rows: Vec::new(),
             status_rows: Vec::new(),
             prompt_suggestions: vec!["Review this repo".to_string()],
+            footer_left: String::new(),
+            footer_right: String::new(),
         };
         let input = "/r".chars().collect::<Vec<_>>();
 
@@ -1278,7 +1321,7 @@ mod tests {
 
     #[test]
     fn input_band_uses_rules_instead_of_filled_background() {
-        let band = input_band("> ", "audit", 12);
+        let band = input_band("> ", "audit", 12, None);
 
         assert!(band.contains("────────────\r\n> audit"));
         assert!(!band.contains("\x1b[48;2;48;48;48m"));
@@ -1349,7 +1392,7 @@ mod tests {
 
     #[test]
     fn input_line_uses_erase_for_remaining_width() {
-        let band = input_band("> ", "hello", 16);
+        let band = input_band("> ", "hello", 16, None);
 
         assert_eq!(band.matches('\n').count(), COMPOSER_BAND_LINES);
         // The editable row uses \x1b[K for the remaining width instead
@@ -1362,7 +1405,7 @@ mod tests {
 
     #[test]
     fn input_band_truncates_long_visible_text_before_wrap_column() {
-        let band = input_band("> ", "hello world", 8);
+        let band = input_band("> ", "hello world", 8, None);
         let input_line = band.lines().nth(1).unwrap();
 
         assert_eq!(visible_chars(input_line), 8);
@@ -1372,7 +1415,7 @@ mod tests {
 
     #[test]
     fn input_band_truncates_ansi_styled_text_by_visible_width() {
-        let band = input_band("> ", "\x1b[2mhello world\x1b[0m", 8);
+        let band = input_band("> ", "\x1b[2mhello world\x1b[0m", 8, None);
         let input_line = band.lines().nth(1).unwrap();
 
         assert_eq!(visible_chars(input_line), 8);

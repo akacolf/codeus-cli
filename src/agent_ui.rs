@@ -11,6 +11,8 @@ const FLAVOR_MESSAGES: &[&str] = &[
     "Thinking...",
     "Processing...",
     "Analyzing...",
+    "Checking context...",
+    "Planning next step...",
 ];
 /// How many spinner frames before rotating to the next flavor message.
 const FRAMES_PER_FLAVOR: usize = 20;
@@ -58,7 +60,11 @@ impl<'a> TurnRenderer<'a> {
     pub fn start_thinking(&mut self) {
         if !self.prompt_text.is_empty() {
             println!();
-            println!("{}", self.terminal.prompt_highlight(&self.prompt_text));
+            println!(
+                "{} {}",
+                self.terminal.muted(">"),
+                self.terminal.prompt_highlight(&self.prompt_text)
+            );
             println!();
         }
 
@@ -189,7 +195,7 @@ impl<'a> TurnRenderer<'a> {
         let secs = elapsed.as_secs();
 
         let status = if secs >= 2 {
-            format!("esc to interrupt · {secs}s")
+            format!("esc to interrupt · {secs}s · next: stream response")
         } else {
             "esc to interrupt".to_string()
         };
