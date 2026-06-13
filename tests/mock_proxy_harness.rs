@@ -25,6 +25,7 @@ fn consumer_cli_accepts_only_bare_codeus() {
         &["usage"][..],
         &["doctor"][..],
         &["harness"][..],
+        &["status"][..],
         &["status", "--output-format", "json"][..],
         &["state"][..],
         &["update"][..],

@@ -8,7 +8,15 @@ use std::io::{self, IsTerminal, Write};
 use std::process;
 
 pub fn should_run(config: &Config) -> bool {
-    config.session_token.is_none() && io::stdin().is_terminal() && io::stdout().is_terminal()
+    !has_current_session(config) && io::stdin().is_terminal() && io::stdout().is_terminal()
+}
+
+fn has_current_session(config: &Config) -> bool {
+    config
+        .session_token
+        .as_deref()
+        .is_some_and(|token| !token.trim().is_empty())
+        && !auth::token_is_expired(config)
 }
 
 pub async fn run(
@@ -274,8 +282,7 @@ where
 
         loop {
             if needs_render {
-                let preview_text;
-                preview_text = preview(selected);
+                let preview_text = preview(selected);
                 let preview = &preview_text;
                 let output =
                     render_selector(terminal, title, hint, choices, selected, style, preview);

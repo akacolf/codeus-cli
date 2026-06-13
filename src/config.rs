@@ -176,6 +176,56 @@ pub fn effective_approval_mode(config: &Config) -> ApprovalMode {
         .unwrap_or_default()
 }
 
+pub fn effective_api_base(override_value: Option<String>, config: &Config) -> String {
+    override_value
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            std::env::var("CODEUS_API_BASE")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .or_else(|| {
+            config
+                .api_base
+                .clone()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .unwrap_or_else(|| DEFAULT_API_BASE.to_string())
+}
+
+pub fn effective_model(override_value: Option<String>, config: &Config) -> String {
+    override_value
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            std::env::var("CODEUS_MODEL")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .or_else(|| {
+            config
+                .model
+                .clone()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .unwrap_or_else(|| DEFAULT_MODEL.to_string())
+}
+
+pub fn effective_session_token(override_value: Option<String>, config: &Config) -> Option<String> {
+    override_value
+        .filter(|token| !token.trim().is_empty())
+        .or_else(|| {
+            std::env::var("CODEUS_SESSION_TOKEN")
+                .ok()
+                .filter(|token| !token.trim().is_empty())
+        })
+        .or_else(|| {
+            config
+                .session_token
+                .clone()
+                .filter(|token| !token.trim().is_empty())
+        })
+}
+
 pub fn config_path() -> Result<PathBuf> {
     let base = dirs::home_dir().context("could not locate user home directory")?;
     Ok(base.join(".config").join("codeus").join("config.toml"))
@@ -189,5 +239,69 @@ fn legacy_config_path() -> Option<PathBuf> {
         None
     } else {
         Some(legacy)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn api_base_resolution_prefers_explicit_then_config_then_default() {
+        let config = Config {
+            api_base: Some("https://api.example.test/v1".to_string()),
+            ..Config::default()
+        };
+
+        assert_eq!(
+            effective_api_base(Some("https://override.test/v1".to_string()), &config),
+            "https://override.test/v1"
+        );
+        if std::env::var_os("CODEUS_API_BASE").is_none() {
+            assert_eq!(
+                effective_api_base(None, &config),
+                "https://api.example.test/v1"
+            );
+            assert_eq!(
+                effective_api_base(None, &Config::default()),
+                DEFAULT_API_BASE
+            );
+        }
+    }
+
+    #[test]
+    fn model_resolution_prefers_explicit_then_config_then_default() {
+        let config = Config {
+            model: Some("haiku-4.5".to_string()),
+            ..Config::default()
+        };
+
+        assert_eq!(
+            effective_model(Some("gpt-5-mini".to_string()), &config),
+            "gpt-5-mini"
+        );
+        if std::env::var_os("CODEUS_MODEL").is_none() {
+            assert_eq!(effective_model(None, &config), "haiku-4.5");
+            assert_eq!(effective_model(None, &Config::default()), DEFAULT_MODEL);
+        }
+    }
+
+    #[test]
+    fn token_resolution_ignores_empty_values() {
+        let config = Config {
+            session_token: Some("stored-token".to_string()),
+            ..Config::default()
+        };
+
+        if std::env::var_os("CODEUS_SESSION_TOKEN").is_none() {
+            assert_eq!(
+                effective_session_token(Some(" ".to_string()), &config).as_deref(),
+                Some("stored-token")
+            );
+        }
+        assert_eq!(
+            effective_session_token(Some("override-token".to_string()), &config).as_deref(),
+            Some("override-token")
+        );
     }
 }

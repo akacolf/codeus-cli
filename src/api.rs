@@ -92,6 +92,7 @@ pub struct DeviceAuthorization {
     pub user_code: Option<String>,
     pub verification_uri: String,
     pub verification_uri_complete: Option<String>,
+    pub poll_url: Option<String>,
     pub expires_in: u64,
     pub interval: u64,
     pub message: Option<String>,
@@ -144,6 +145,10 @@ impl CodeusClient {
         &self.config
     }
 
+    pub fn set_model(&mut self, model: impl Into<String>) {
+        self.config.model = model.into();
+    }
+
     pub async fn stream_chat<F>(&self, messages: &[Message], on_delta: F) -> Result<String>
     where
         F: FnMut(&str) -> Result<()>,
@@ -175,11 +180,6 @@ impl CodeusClient {
     where
         F: FnMut(&str) -> Result<()>,
     {
-        let url = format!(
-            "{}/chat/completions",
-            self.config.api_base.trim_end_matches('/')
-        );
-
         let mut body = json!({
             "model": normalize_model(&self.config.model),
             "stream": true,
@@ -190,42 +190,82 @@ impl CodeusClient {
             body["tool_choice"] = json!("auto");
         }
 
-        let response = self
-            .http
-            .post(url)
-            .json(&body)
-            .send()
-            .await
-            .context("request failed")?;
+        let gateways = self.chat_gateway_urls();
+        let mut last_error = None;
+        for (index, url) in gateways.iter().enumerate() {
+            let is_last = index + 1 == gateways.len();
+            let response = match self.http.post(url).json(&body).send().await {
+                Ok(response) => response,
+                Err(error) if !is_last => {
+                    last_error = Some(format!("{url}: {error}"));
+                    continue;
+                }
+                Err(error) => {
+                    let detail = last_error
+                        .map(|last| format!("; previous gateway failed: {last}"))
+                        .unwrap_or_default();
+                    return Err(anyhow!("request failed at {url}: {error}{detail}"));
+                }
+            };
 
-        let status = response.status();
-        if !status.is_success() {
-            let text = response.text().await.unwrap_or_default();
-            return Err(anyhow!("proxy returned {status}: {}", text.trim()));
-        }
+            let status = response.status();
+            if !status.is_success() {
+                let text = response.text().await.unwrap_or_default();
+                if !is_last {
+                    last_error = Some(format!("{url}: {status}: {}", text.trim()));
+                    continue;
+                }
+                let detail = last_error
+                    .map(|last| format!(" Previous gateway failed: {last}."))
+                    .unwrap_or_default();
+                return Err(anyhow!("{}", chat_gateway_error(status, &text, &detail)));
+            }
 
-        let mut stream = response.bytes_stream();
-        let mut buffer = String::with_capacity(8192);
-        let mut completion = StreamingCompletion::default();
+            let mut stream = response.bytes_stream();
+            let mut buffer = String::with_capacity(8192);
+            let mut completion = StreamingCompletion::default();
 
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.context("failed to read response stream")?;
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.context("failed to read response stream")?;
+                buffer.push_str(&String::from_utf8_lossy(&chunk));
 
-            while let Some((split, width)) = find_sse_boundary(&buffer) {
-                let event: String = buffer.drain(..split).collect();
-                buffer.drain(..width);
-                if consume_sse_event(&event, &mut completion, &mut on_delta)? {
-                    return Ok(completion.finish());
+                while let Some((split, width)) = find_sse_boundary(&buffer) {
+                    let event: String = buffer.drain(..split).collect();
+                    buffer.drain(..width);
+                    if consume_sse_event(&event, &mut completion, &mut on_delta)? {
+                        return Ok(completion.finish());
+                    }
                 }
             }
+
+            if !buffer.trim().is_empty() {
+                let _ = consume_sse_event(&buffer, &mut completion, &mut on_delta)?;
+            }
+
+            return Ok(completion.finish());
         }
 
-        if !buffer.trim().is_empty() {
-            let _ = consume_sse_event(&buffer, &mut completion, &mut on_delta)?;
-        }
+        Err(anyhow!("no chat gateways configured"))
+    }
 
-        Ok(completion.finish())
+    fn chat_gateway_urls(&self) -> Vec<String> {
+        let direct_gateway = std::env::var("CODEUS_VERCEL_AI_GATEWAY_BASE")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let proxy = self.config.api_base.trim().to_string();
+
+        let mut urls = Vec::new();
+        for base in [proxy].into_iter().chain(direct_gateway) {
+            let base = base.trim().trim_end_matches('/');
+            if base.is_empty() {
+                continue;
+            }
+            let url = format!("{base}/chat/completions");
+            if !urls.iter().any(|existing| existing == &url) {
+                urls.push(url);
+            }
+        }
+        urls
     }
 
     pub async fn begin_device_login(&self) -> Result<DeviceAuthorization> {
@@ -283,12 +323,43 @@ impl CodeusClient {
             "device_code": device_code,
         });
 
+        self.poll_device_token_with_body(device_code, &body, None)
+            .await
+    }
+
+    pub async fn poll_device_authorization(
+        &self,
+        auth: &DeviceAuthorization,
+    ) -> Result<DeviceTokenStatus> {
+        let body = json!({
+            "client_id": "codeus-cli",
+            "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+            "deviceCode": &auth.device_code,
+            "device_code": &auth.device_code,
+        });
+
+        self.poll_device_token_with_body(&auth.device_code, &body, auth.poll_url.as_deref())
+            .await
+    }
+
+    async fn poll_device_token_with_body(
+        &self,
+        device_code: &str,
+        body: &Value,
+        poll_url: Option<&str>,
+    ) -> Result<DeviceTokenStatus> {
         let mut last_not_found = String::new();
-        for path in ["device/link/poll", "auth/device/token"] {
+        let mut urls = Vec::new();
+        if let Some(poll_url) = poll_url.filter(|url| !url.trim().is_empty()) {
+            urls.push(poll_url.trim().to_string());
+        }
+        urls.extend(["device/link/poll", "auth/device/token"].map(|path| self.url(path)));
+
+        for url in urls {
             let response = self
                 .http
-                .post(self.url(path))
-                .json(&body)
+                .post(url)
+                .json(body)
                 .send()
                 .await
                 .context("failed to poll browser login")?;
@@ -326,7 +397,10 @@ impl CodeusClient {
             return parse_device_token_error(status, &text, value);
         }
 
-        Err(anyhow!("browser login failed (404): {last_not_found}"))
+        Err(anyhow!(
+            "browser login failed for device code {} (404): {last_not_found}",
+            redact_device_code(device_code)
+        ))
     }
 
     pub async fn refresh_session(&self, refresh_token: &str) -> Result<TokenSet> {
@@ -369,8 +443,7 @@ impl CodeusClient {
 
     pub async fn usage(&self) -> Result<Value> {
         // /balance is the canonical usage endpoint on the website.
-        self.get_json_from_candidates(&["balance", "usage"])
-            .await
+        self.get_json_from_candidates(&["balance", "usage"]).await
     }
 
     /// Revoke the session token server-side. Best-effort — errors are ignored
@@ -501,6 +574,7 @@ fn parse_device_authorization(value: Value) -> Result<DeviceAuthorization> {
                 "linkUrl",
             ],
         ),
+        poll_url: string_field(&value, &["poll_url", "pollUrl"]),
         expires_in: expires_in_field(&value).unwrap_or(600),
         interval: u64_field(&value, &["interval"]).unwrap_or(5).max(1),
         message: string_field(&value, &["message"]),
@@ -566,6 +640,47 @@ fn with_cli_client_hint(url: &str) -> String {
 
     let separator = if url.contains('?') { '&' } else { '?' };
     format!("{url}{separator}client=cli")
+}
+
+fn redact_device_code(value: &str) -> String {
+    if value.len() <= 8 {
+        return "<redacted>".to_string();
+    }
+    format!("{}...{}", &value[..4], &value[value.len() - 4..])
+}
+
+fn chat_gateway_error(status: StatusCode, text: &str, detail: &str) -> String {
+    if status == StatusCode::PAYMENT_REQUIRED {
+        if let Ok(value) = serde_json::from_str::<Value>(text) {
+            let is_x402 = value.get("x402Version").is_some()
+                || value
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .is_some_and(|error| error.eq_ignore_ascii_case("payment required"));
+            if is_x402 {
+                let description = value
+                    .get("resource")
+                    .and_then(|resource| resource.get("description"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("Top up QC Codeus balance");
+                let price = value
+                    .get("accepts")
+                    .and_then(Value::as_array)
+                    .and_then(|accepts| accepts.first())
+                    .and_then(|accept| accept.get("extra"))
+                    .and_then(|extra| extra.get("price"))
+                    .and_then(Value::as_str);
+                let payment = price
+                    .map(|price| format!(" Payment request: {price}."))
+                    .unwrap_or_default();
+                return format!(
+                    "chat gateway returned 402 Payment Required: {description}.{payment} Add Codeus credits or ask an admin to grant account balance through the supported billing/admin flow.{detail}"
+                );
+            }
+        }
+    }
+
+    format!("chat gateway returned {status}: {}{detail}", text.trim())
 }
 
 fn find_sse_boundary(buffer: &str) -> Option<(usize, usize)> {
@@ -880,8 +995,33 @@ mod tests {
             auth.verification_uri,
             "https://quantumclub.sh/account/link?code=ABCD2345"
         );
+        assert_eq!(
+            auth.poll_url.as_deref(),
+            Some("https://quantumclub.sh/api/codeus/v1/device/link/poll")
+        );
         assert_eq!(auth.interval, 2);
         assert!(auth.expires_in > 0);
+    }
+
+    #[test]
+    fn formats_x402_chat_error_without_raw_payment_json() {
+        let text = json!({
+            "x402Version": 2,
+            "error": "Payment required",
+            "resource": {
+                "description": "Top up QC Codeus balance with USDC on Base or Solana"
+            },
+            "accepts": [{
+                "extra": { "price": "$5.00" }
+            }]
+        })
+        .to_string();
+
+        let error = chat_gateway_error(StatusCode::PAYMENT_REQUIRED, &text, "");
+
+        assert!(error.contains("Top up QC Codeus balance"));
+        assert!(error.contains("$5.00"));
+        assert!(!error.contains("x402Version"));
     }
 
     #[test]

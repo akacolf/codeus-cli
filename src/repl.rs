@@ -9,11 +9,40 @@ use crate::terminal::Terminal;
 use crate::tool_protocol;
 use crate::tools::{ToolObservation, ToolStatus};
 use anyhow::{Context, Result};
+use std::fs;
 use std::io::{self, IsTerminal};
 use std::time::Instant;
 
 const MAX_MODEL_TOOL_STEPS: usize = 4;
-const AVAILABLE_MODELS: &[&str] = &["sonnet-4.6"];
+#[derive(Debug, Clone, Copy)]
+struct AvailableModel {
+    id: &'static str,
+    label: &'static str,
+    detail: &'static str,
+}
+
+const AVAILABLE_MODELS: &[AvailableModel] = &[
+    AvailableModel {
+        id: "gpt-5-mini",
+        label: "GPT 5 Mini",
+        detail: "Fast OpenAI model for everyday coding",
+    },
+    AvailableModel {
+        id: "sonnet-4.6",
+        label: "Claude Sonnet 4.6",
+        detail: "Balanced model for agentic coding",
+    },
+    AvailableModel {
+        id: "gemini-3-flash",
+        label: "Gemini 3 Flash",
+        detail: "Fast Google model for quick turns",
+    },
+    AvailableModel {
+        id: "haiku-4.5",
+        label: "Claude Haiku 4.5",
+        detail: "Small model for lightweight edits",
+    },
+];
 
 const COMMAND_SUGGESTIONS: &[Suggestion<'static>] = &[
     Suggestion {
@@ -38,7 +67,11 @@ const COMMAND_SUGGESTIONS: &[Suggestion<'static>] = &[
     },
     Suggestion {
         value: "/model",
-        detail: "Show available models",
+        detail: "Show or change model",
+    },
+    Suggestion {
+        value: "/logout",
+        detail: "Sign out",
     },
     Suggestion {
         value: "/clear",
@@ -56,12 +89,13 @@ const COMMAND_HELP_ROWS: &[(&str, &str)] = &[
     ("/resume [id|latest]", "Resume a saved chat"),
     ("/swap", "Show Omniston v1beta8 swap helper"),
     ("/theme", "Change the terminal theme"),
-    ("/model", "Show available models"),
+    ("/model [name|number]", "Show or change models"),
+    ("/logout", "Sign out and remove stored tokens"),
     ("/clear, /reset", "Clear context and start fresh"),
     ("/exit, /quit", "Leave chat"),
 ];
 
-pub async fn run(client: CodeusClient) -> Result<()> {
+pub async fn run(mut client: CodeusClient) -> Result<()> {
     let stored = Config::load()?;
     let mut terminal = Terminal::detect_with_theme(stored.theme.as_deref());
     let mut session = Session::new()?;
@@ -71,7 +105,8 @@ pub async fn run(client: CodeusClient) -> Result<()> {
     print_welcome(&terminal, &client, &session, &account).await;
 
     loop {
-        let (prompt, prompt_width, chrome) = prompt(&terminal, &account, &session);
+        let (prompt, prompt_width, chrome) =
+            prompt(&terminal, &client.config().model, &account, &session);
         let input = match input::read_line_with_chrome_and_history(
             &prompt,
             prompt_width,
@@ -91,7 +126,7 @@ pub async fn run(client: CodeusClient) -> Result<()> {
             match handle_command(
                 command_input,
                 &mut terminal,
-                &client,
+                &mut client,
                 &mut session,
                 &mut account,
             )
@@ -102,7 +137,7 @@ pub async fn run(client: CodeusClient) -> Result<()> {
             }
         }
 
-        if client.config().token.is_none() {
+        if !account.is_connected() {
             println!("{} No QC account is connected.", terminal.warn("•"));
             continue;
         }
@@ -397,7 +432,7 @@ enum CommandResult {
 async fn handle_command(
     input: &str,
     terminal: &mut Terminal,
-    client: &CodeusClient,
+    client: &mut CodeusClient,
     session: &mut Session,
     account: &mut AccountSummary,
 ) -> Result<CommandResult> {
@@ -418,6 +453,14 @@ async fn handle_command(
         }
         "/status" => {
             show_status(client, session, account)?;
+            Ok(CommandResult::Continue)
+        }
+        "/logout" | "/signout" => {
+            logout_current_session(client, account).await?;
+            println!(
+                "{}",
+                terminal.success("Signed out. Run `codeus` again to connect another account.")
+            );
             Ok(CommandResult::Continue)
         }
         "/resume" => {
@@ -451,14 +494,25 @@ async fn handle_command(
             Ok(CommandResult::Continue)
         }
         "/model" => {
-            println!("{}", terminal.accent("Available models"));
-            for model in AVAILABLE_MODELS {
-                let marker = if *model == client.config().model {
-                    "*"
-                } else {
-                    " "
-                };
-                println!("  {marker} {model}");
+            let selection = parts.collect::<Vec<_>>().join(" ");
+            if selection.trim().is_empty() {
+                if let Some(model) = select_model_interactive(&client.config().model)? {
+                    save_model_selection(client, model)?;
+                    clear_screen();
+                    print_welcome(terminal, client, session, account).await;
+                    print_model_set(terminal, model);
+                }
+            } else if let Some(model) = resolve_model_selection(&selection) {
+                save_model_selection(client, model)?;
+                clear_screen();
+                print_welcome(terminal, client, session, account).await;
+                print_model_set(terminal, model);
+            } else {
+                println!(
+                    "{} Unknown model `{}`. Type /model to see available models.",
+                    terminal.warn("•"),
+                    selection.trim()
+                );
             }
             Ok(CommandResult::Continue)
         }
@@ -479,7 +533,7 @@ async fn print_welcome(
     session: &Session,
     account: &AccountSummary,
 ) {
-    if client.config().token.is_none() {
+    if !account.is_connected() {
         print_signed_out_intro(terminal);
         return;
     }
@@ -665,8 +719,21 @@ fn first_output_line(output: &str) -> Option<String> {
         })
 }
 
-fn show_status(_client: &CodeusClient, session: &Session, account: &AccountSummary) -> Result<()> {
-    input::show_status_view(&status_rows(account, session))
+fn show_status(client: &CodeusClient, session: &Session, account: &AccountSummary) -> Result<()> {
+    input::show_status_view(&status_rows(account, session, &client.config().model))
+}
+
+async fn logout_current_session(client: &CodeusClient, account: &mut AccountSummary) -> Result<()> {
+    let _ = client.signout().await;
+
+    let mut config = Config::load()?;
+    config.session_token = None;
+    config.refresh_token = None;
+    config.token_expires_at = None;
+    config.onboarded = Some(false);
+    config.save()?;
+    *account = AccountSummary::signed_out();
+    Ok(())
 }
 
 fn print_swap_helper(terminal: &Terminal, args: &str) {
@@ -722,6 +789,209 @@ fn print_swap_helper(terminal: &Terminal, args: &str) {
     );
 }
 
+fn print_model_picker(terminal: &Terminal, current_model: &str) {
+    println!();
+    println!("{}", terminal.accent("Select model"));
+    println!(
+        "{}",
+        terminal
+            .muted("Switch between Codeus models. Applies to this session and future sessions.")
+    );
+    println!();
+    for (index, model) in AVAILABLE_MODELS.iter().enumerate() {
+        let selected = model.id == current_model;
+        let cursor = if selected { "›" } else { " " };
+        let check = if selected {
+            terminal.success("✓")
+        } else {
+            String::new()
+        };
+        let label = if selected {
+            terminal.success(model.label)
+        } else {
+            terminal.title(model.label)
+        };
+        println!(
+            "  {} {}. {:<22} {} {}",
+            cursor,
+            index + 1,
+            label,
+            terminal.muted(model.detail),
+            check
+        );
+    }
+    println!();
+    println!(
+        "{}",
+        terminal.muted("Use `/model 1` or `/model gpt-5-mini` to set the model.")
+    );
+}
+
+fn select_model_interactive(current_model: &str) -> Result<Option<AvailableModel>> {
+    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+        let terminal = Terminal::detect_with_theme(None);
+        print_model_picker(&terminal, current_model);
+        return Ok(None);
+    }
+
+    use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+    use crossterm::execute;
+    use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
+    use ratatui::backend::CrosstermBackend;
+    use ratatui::Terminal as RatatuiTerminal;
+
+    let mut selected = AVAILABLE_MODELS
+        .iter()
+        .position(|model| model.id == current_model)
+        .unwrap_or(0);
+
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let result = (|| -> Result<Option<AvailableModel>> {
+        let _raw = RawModeGuard::enable()?;
+        let backend = CrosstermBackend::new(io::stdout());
+        let mut terminal = RatatuiTerminal::new(backend)?;
+        terminal.clear()?;
+
+        loop {
+            terminal.draw(|frame| draw_model_picker(frame, selected, current_model))?;
+            let Event::Key(key) = event::read()? else {
+                continue;
+            };
+            if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                continue;
+            }
+
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    selected = selected
+                        .checked_sub(1)
+                        .unwrap_or(AVAILABLE_MODELS.len() - 1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    selected = (selected + 1) % AVAILABLE_MODELS.len();
+                }
+                KeyCode::Enter => return Ok(Some(AVAILABLE_MODELS[selected])),
+                KeyCode::Esc => return Ok(None),
+                _ => {}
+            }
+        }
+    })();
+
+    let mut stdout = io::stdout();
+    execute!(stdout, LeaveAlternateScreen)?;
+    result
+}
+
+fn draw_model_picker(frame: &mut ratatui::Frame<'_>, selected: usize, current_model: &str) {
+    use ratatui::layout::{Constraint, Direction, Layout};
+    use ratatui::style::{Color, Modifier, Style};
+    use ratatui::text::{Line, Span};
+    use ratatui::widgets::{Block, Borders, Paragraph};
+
+    let area = frame.area();
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .margin(1)
+        .constraints([Constraint::Min(1)])
+        .split(area);
+
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "Select model",
+            Style::default()
+                .fg(Color::LightBlue)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            "Switch between Codeus models. Applies to this session and future Codeus sessions.",
+            Style::default().fg(Color::Gray),
+        )),
+        Line::from(Span::styled(
+            "For other/previous model names, specify with /model <name>.",
+            Style::default().fg(Color::Gray),
+        )),
+        Line::from(""),
+    ];
+
+    for (index, model) in AVAILABLE_MODELS.iter().enumerate() {
+        let is_selected = index == selected;
+        let is_current = model.id == current_model;
+        let cursor = if is_selected { "›" } else { " " };
+        let label_style = if is_current {
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD)
+        } else if is_selected {
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        let check = if is_current { " ✓" } else { "" };
+
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("  {cursor} {:>2}. ", index + 1),
+                Style::default().fg(if is_selected {
+                    Color::LightBlue
+                } else {
+                    Color::DarkGray
+                }),
+            ),
+            Span::styled(format!("{:<22}", model.label), label_style),
+            Span::styled(model.detail, Style::default().fg(Color::DarkGray)),
+            Span::styled(check, Style::default().fg(Color::Green)),
+        ]));
+    }
+
+    lines.extend([
+        Line::from(""),
+        Line::from(Span::styled(
+            "Enter to confirm · Esc to exit",
+            Style::default().fg(Color::Gray),
+        )),
+    ]);
+
+    let panel = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::TOP | Borders::BOTTOM)
+            .border_style(Style::default().fg(Color::DarkGray)),
+    );
+    frame.render_widget(panel, rows[0]);
+}
+
+fn save_model_selection(client: &mut CodeusClient, model: AvailableModel) -> Result<()> {
+    let mut config = Config::load()?;
+    config.model = Some(model.id.to_string());
+    config.save()?;
+    client.set_model(model.id);
+    Ok(())
+}
+
+fn print_model_set(terminal: &Terminal, model: AvailableModel) {
+    println!(
+        "{} Set model to {}",
+        terminal.muted("└"),
+        terminal.title(model.label)
+    );
+}
+
+fn resolve_model_selection(selection: &str) -> Option<AvailableModel> {
+    let normalized = selection.trim().to_ascii_lowercase();
+    if let Ok(index) = normalized.parse::<usize>() {
+        return AVAILABLE_MODELS.get(index.saturating_sub(1)).copied();
+    }
+
+    AVAILABLE_MODELS.iter().copied().find(|model| {
+        normalized == model.id
+            || normalized == model.label.to_ascii_lowercase()
+            || normalized == model.label.to_ascii_lowercase().replace(' ', "-")
+            || normalized == model.id.replace('-', " ")
+    })
+}
+
 fn clear_screen() {
     print!("\x1b[2J\x1b[H");
 }
@@ -750,6 +1020,10 @@ impl AccountSummary {
     fn plan_value(&self) -> &str {
         &self.plan
     }
+
+    fn is_connected(&self) -> bool {
+        self.plan != "not connected"
+    }
 }
 
 async fn account_summary(client: &CodeusClient) -> AccountSummary {
@@ -758,10 +1032,7 @@ async fn account_summary(client: &CodeusClient) -> AccountSummary {
     }
 
     let Ok(account) = client.account().await else {
-        return AccountSummary {
-            plan: "QC account".to_string(),
-            email: None,
-        };
+        return AccountSummary::signed_out();
     };
     let email = account_email(&account);
     let plan = if email
@@ -840,6 +1111,13 @@ fn format_subscription(value: &str) -> String {
 }
 
 fn display_model(model: &str) -> String {
+    if let Some(model) = AVAILABLE_MODELS
+        .iter()
+        .find(|available| available.id == model)
+    {
+        return model.label.to_string();
+    }
+
     model
         .split(['-', '_'])
         .filter(|part| !part.is_empty())
@@ -864,19 +1142,20 @@ fn display_model(model: &str) -> String {
 
 fn prompt(
     terminal: &Terminal,
+    model: &str,
     account: &AccountSummary,
     session: &Session,
 ) -> (String, usize, input::ComposerChrome) {
     let chrome = input::ComposerChrome {
         active_commands: active_commands(),
         help_rows: command_help_rows(),
-        status_rows: status_rows(account, session),
-        prompt_suggestions: prompt_suggestions(),
+        status_rows: status_rows(account, session, model),
+        prompt_suggestions: prompt_suggestions(session),
     };
     (terminal.composer_prompt(), 2, chrome)
 }
 
-fn status_rows(account: &AccountSummary, session: &Session) -> Vec<input::StatusRow> {
+fn status_rows(account: &AccountSummary, session: &Session, model: &str) -> Vec<input::StatusRow> {
     let turns = session.transcript_len();
     vec![
         input::StatusRow {
@@ -885,7 +1164,7 @@ fn status_rows(account: &AccountSummary, session: &Session) -> Vec<input::Status
         },
         input::StatusRow {
             label: "Model".to_string(),
-            value: AVAILABLE_MODELS.join(", "),
+            value: display_model(model),
         },
         input::StatusRow {
             label: "Project".to_string(),
@@ -906,12 +1185,38 @@ fn status_rows(account: &AccountSummary, session: &Session) -> Vec<input::Status
     ]
 }
 
-fn prompt_suggestions() -> Vec<String> {
-    vec![
-        "Build an Omniston v1beta8 quote flow for STON.fi and Mira".to_string(),
-        "Review this repo for hackathon readiness".to_string(),
-        "Design a safe cross-chain swap confirmation flow".to_string(),
-    ]
+fn prompt_suggestions(session: &Session) -> Vec<String> {
+    if session.transcript_len() > 0 {
+        return Vec::new();
+    }
+
+    let cwd = session.cwd();
+    let mut suggestions = Vec::new();
+
+    if cwd.join("Cargo.toml").exists() {
+        suggestions.push("Run cargo check and fix the first failure".to_string());
+        suggestions.push("Review this Rust CLI for release blockers".to_string());
+    }
+
+    if cwd.join("package.json").exists() {
+        suggestions.push("Run the frontend checks and fix the first failure".to_string());
+        suggestions.push("Review this app for broken UI states".to_string());
+    }
+
+    if cwd.join("AGENTS.md").exists() {
+        suggestions.push("Explain the repo conventions before making changes".to_string());
+    }
+
+    if project_has_git(cwd) {
+        suggestions.insert(0, "Show the current project status".to_string());
+    }
+
+    suggestions.truncate(3);
+    suggestions
+}
+
+fn project_has_git(cwd: &std::path::Path) -> bool {
+    fs::metadata(cwd.join(".git")).is_ok()
 }
 
 fn command_help_rows() -> Vec<input::HelpRow> {

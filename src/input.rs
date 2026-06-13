@@ -8,7 +8,7 @@ const COMPOSER_SAFE_AREA_LINES: usize = 2;
 const COMPOSER_BAND_LINES: usize = 3;
 const COMPOSER_INPUT_LINE_OFFSET: usize = 1;
 const ACTIVE_COLOR: &str = "\x1b[1m\x1b[38;2;0;168;204m";
-const INPUT_BG: &str = "\x1b[48;2;48;48;48m";
+const COMPOSER_RULE_COLOR: &str = "\x1b[38;2;82;82;82m";
 
 #[derive(Debug, Clone, Copy)]
 pub struct Suggestion<'a> {
@@ -153,18 +153,18 @@ fn read_interactive_line(
     let mut menu_start = 0usize;
     let mut menu_hidden = false;
 
-    render_prompt(
+    render_prompt(RenderPromptArgs {
         prompt,
         prompt_width,
-        &input,
+        input: &input,
         cursor,
         suggestions,
         selected,
         menu_start,
         chrome,
         menu_hidden,
-        false,
-    )?;
+        clear_existing: false,
+    })?;
 
     loop {
         let matches = if menu_hidden {
@@ -191,18 +191,18 @@ fn read_interactive_line(
                         selected = 0;
                         menu_start = 0;
                         menu_hidden = false;
-                        render_prompt(
+                        render_prompt(RenderPromptArgs {
                             prompt,
                             prompt_width,
-                            &input,
+                            input: &input,
                             cursor,
                             suggestions,
                             selected,
                             menu_start,
                             chrome,
                             menu_hidden,
-                            false,
-                        )?;
+                            clear_existing: false,
+                        })?;
                         continue;
                     }
                     if chrome.is_some_and(|chrome| is_status_command(&line, chrome)) {
@@ -215,18 +215,18 @@ fn read_interactive_line(
                         selected = 0;
                         menu_start = 0;
                         menu_hidden = false;
-                        render_prompt(
+                        render_prompt(RenderPromptArgs {
                             prompt,
                             prompt_width,
-                            &input,
+                            input: &input,
                             cursor,
                             suggestions,
                             selected,
                             menu_start,
                             chrome,
                             menu_hidden,
-                            false,
-                        )?;
+                            clear_existing: false,
+                        })?;
                         continue;
                     }
                     clear_composer_area(chrome.is_some());
@@ -253,18 +253,18 @@ fn read_interactive_line(
                     selected = 0;
                     menu_start = 0;
                     menu_hidden = false;
-                    render_prompt(
+                    render_prompt(RenderPromptArgs {
                         prompt,
                         prompt_width,
-                        &input,
+                        input: &input,
                         cursor,
                         suggestions,
                         selected,
                         menu_start,
                         chrome,
                         menu_hidden,
-                        false,
-                    )?;
+                        clear_existing: false,
+                    })?;
                     continue;
                 }
                 if chrome.is_some_and(|chrome| is_status_command(&line, chrome)) {
@@ -277,18 +277,18 @@ fn read_interactive_line(
                     selected = 0;
                     menu_start = 0;
                     menu_hidden = false;
-                    render_prompt(
+                    render_prompt(RenderPromptArgs {
                         prompt,
                         prompt_width,
-                        &input,
+                        input: &input,
                         cursor,
                         suggestions,
                         selected,
                         menu_start,
                         chrome,
                         menu_hidden,
-                        false,
-                    )?;
+                        clear_existing: false,
+                    })?;
                     continue;
                 }
                 clear_composer_area(chrome.is_some());
@@ -470,18 +470,18 @@ fn read_interactive_line(
             Key::Other => {}
         }
 
-        render_prompt(
+        render_prompt(RenderPromptArgs {
             prompt,
             prompt_width,
-            &input,
+            input: &input,
             cursor,
             suggestions,
             selected,
             menu_start,
             chrome,
             menu_hidden,
-            true,
-        )?;
+            clear_existing: true,
+        })?;
     }
 }
 
@@ -508,18 +508,33 @@ fn read_interactive_line(
     Ok(PromptOutcome::Line(line))
 }
 
-fn render_prompt(
-    prompt: &str,
+struct RenderPromptArgs<'a, 's, 'c> {
+    prompt: &'a str,
     prompt_width: usize,
-    input: &[char],
+    input: &'a [char],
     cursor: usize,
-    suggestions: &[Suggestion<'_>],
+    suggestions: &'s [Suggestion<'s>],
     selected: usize,
     menu_start: usize,
-    chrome: Option<&ComposerChrome>,
+    chrome: Option<&'c ComposerChrome>,
     menu_hidden: bool,
     clear_existing: bool,
-) -> Result<()> {
+}
+
+fn render_prompt(args: RenderPromptArgs<'_, '_, '_>) -> Result<()> {
+    let RenderPromptArgs {
+        prompt,
+        prompt_width,
+        input,
+        cursor,
+        suggestions,
+        selected,
+        menu_start,
+        chrome,
+        menu_hidden,
+        clear_existing,
+    } = args;
+
     let matches = if menu_hidden {
         Vec::new()
     } else {
@@ -617,28 +632,24 @@ fn render_input_band(prompt: &str, input_text: &str, width: usize) {
 fn input_band(prompt: &str, input_text: &str, width: usize) -> String {
     format!(
         "{}{}{}",
-        blank_input_line(),
+        composer_rule(width),
         input_line(prompt, input_text, width),
-        blank_input_line()
+        composer_rule(width)
     )
 }
 
-/// Render a full-width blank line with the input background color.
-/// Uses `\x1b[K` (erase-to-end-of-line) so the background extends to
-/// the terminal edge without manual space-padding or wrap-column math.
-fn blank_input_line() -> String {
-    format!("{INPUT_BG}\x1b[K\x1b[0m\r\n")
+fn composer_rule(width: usize) -> String {
+    let rule = "─".repeat(width);
+    if color_enabled() {
+        format!("{COMPOSER_RULE_COLOR}{rule}\x1b[0m\r\n")
+    } else {
+        format!("{rule}\r\n")
+    }
 }
 
-/// Render the input line with prompt and text, filling the rest of the
-/// line with `\x1b[K`.  The `width` parameter is only used to truncate
-/// text that would exceed the terminal width; the visual fill is
-/// handled by the erase-to-end-of-line escape.
 fn input_line(prompt: &str, input_text: &str, width: usize) -> String {
-    let prompt = paint_on_input_bg(prompt);
-    let input_text = truncate_visible(input_text, width.saturating_sub(visible_chars(&prompt)));
-    let input_text = paint_on_input_bg(&input_text);
-    format!("{INPUT_BG}{prompt}{INPUT_BG}{input_text}{INPUT_BG}\x1b[K\x1b[0m\r\n")
+    let input_text = truncate_visible(input_text, width.saturating_sub(visible_chars(prompt)));
+    format!("{prompt}{input_text}\x1b[K\x1b[0m\r\n")
 }
 
 fn composer_draw_width(terminal_width: usize) -> usize {
@@ -657,10 +668,6 @@ fn placeholder_input(chrome: Option<&ComposerChrome>) -> String {
     } else {
         suggestion.to_string()
     }
-}
-
-fn paint_on_input_bg(value: &str) -> String {
-    value.replace("\x1b[0m", &format!("\x1b[0m{INPUT_BG}"))
 }
 
 fn show_help_view(chrome: &ComposerChrome) -> Result<()> {
@@ -1270,6 +1277,14 @@ mod tests {
     }
 
     #[test]
+    fn input_band_uses_rules_instead_of_filled_background() {
+        let band = input_band("> ", "audit", 12);
+
+        assert!(band.contains("────────────\r\n> audit"));
+        assert!(!band.contains("\x1b[48;2;48;48;48m"));
+    }
+
+    #[test]
     fn key_mapping_is_platform_neutral_for_arrows() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -1333,12 +1348,12 @@ mod tests {
     }
 
     #[test]
-    fn input_band_uses_erase_for_full_width_fill() {
+    fn input_line_uses_erase_for_remaining_width() {
         let band = input_band("> ", "hello", 16);
 
         assert_eq!(band.matches('\n').count(), COMPOSER_BAND_LINES);
-        // Each line uses \x1b[K to fill remaining width instead of
-        // manual space-padding, avoiding wrap-column arithmetic.
+        // The editable row uses \x1b[K for the remaining width instead
+        // of manual space-padding, avoiding wrap-column arithmetic.
         assert!(band.contains("\x1b[K"));
         // The input line still renders prompt + text.
         let content_line = band.lines().nth(1).unwrap();

@@ -22,9 +22,7 @@ mod update;
 use anyhow::{bail, Context, Result};
 use api::{ClientConfig, CodeusClient, Message};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use config::{
-    ApprovalMode, Config, PermissionMode, SandboxPolicy, DEFAULT_API_BASE, DEFAULT_MODEL,
-};
+use config::{ApprovalMode, Config, PermissionMode, SandboxPolicy};
 use serde::Serialize;
 use serde_json::json;
 use std::io::{self, Write};
@@ -138,6 +136,8 @@ enum ConfigCommand {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
+    reject_public_subcommands()?;
+
     let cli = Cli::parse();
     let stored = Config::load()?;
     let globals = GlobalOptions {
@@ -165,13 +165,11 @@ async fn main() -> Result<()> {
         Some(Command::Login(args)) => login(args).await,
         Some(Command::Logout) => logout(&stored).await,
         Some(Command::Account) => {
-            let client =
-                client_from(&globals, &stored, None, AuthMode::Required).await?;
+            let client = client_from(&globals, &stored, None, AuthMode::Required).await?;
             account_command(&client, OutputFormat::Text).await
         }
         Some(Command::Usage) => {
-            let client =
-                client_from(&globals, &stored, None, AuthMode::Required).await?;
+            let client = client_from(&globals, &stored, None, AuthMode::Required).await?;
             usage_command(&client, OutputFormat::Text).await
         }
         Some(Command::Doctor) => doctor_command(&globals, &stored, OutputFormat::Text).await,
@@ -179,10 +177,20 @@ async fn main() -> Result<()> {
         Some(Command::Status) => status_command(&globals, &stored, OutputFormat::Text),
         Some(Command::State) => state_command(OutputFormat::Text),
         Some(Command::Update) => update::run_update().await,
-        Some(Command::Config { command }) => {
-            config_command(command, stored, OutputFormat::Text)
-        }
+        Some(Command::Config { command }) => config_command(command, stored, OutputFormat::Text),
     }
+}
+
+fn reject_public_subcommands() -> Result<()> {
+    if std::env::var_os("CODEUS_INTERNAL_COMMANDS").is_some() {
+        return Ok(());
+    }
+
+    if std::env::args_os().nth(1).is_some() {
+        bail!("Codeus starts with `codeus`. Open the terminal interface first, then use slash commands inside the harness.");
+    }
+
+    Ok(())
 }
 
 async fn run_prompt(
@@ -250,7 +258,11 @@ async fn client_from(
         .token
         .clone()
         .filter(|token| !token.trim().is_empty())
-    {
+        .or_else(|| {
+            std::env::var("CODEUS_SESSION_TOKEN")
+                .ok()
+                .filter(|token| !token.trim().is_empty())
+        }) {
         Some(token)
     } else if let Some(token) = stored
         .session_token
@@ -289,8 +301,8 @@ async fn client_from(
     }
 
     let config = ClientConfig {
-        api_base: DEFAULT_API_BASE.to_string(),
-        model: DEFAULT_MODEL.to_string(),
+        api_base: resolve_api_base(globals, &stored),
+        model: resolve_model(globals, &stored),
         token,
     };
 
@@ -299,19 +311,102 @@ async fn client_from(
 
 async fn maybe_onboard(
     globals: &GlobalOptions,
-    stored: Config,
+    mut stored: Config,
     command_model: Option<String>,
 ) -> Result<Config> {
-    if !onboarding::should_run(&stored) || globals.token.is_some() {
+    if globals.token.is_some() {
         return Ok(stored);
     }
 
-    onboarding::run(
-        globals.api_base.clone(),
-        command_model.or_else(|| globals.model.clone()),
-        stored,
-    )
-    .await
+    let auth_model = command_model.or_else(|| globals.model.clone());
+
+    if auth::token_is_expired(&stored) {
+        if let Some(refresh_token) = stored
+            .refresh_token
+            .clone()
+            .filter(|token| !token.trim().is_empty())
+        {
+            if auth::refresh_session(
+                globals.api_base.clone(),
+                auth_model.clone(),
+                &mut stored,
+                &refresh_token,
+            )
+            .await
+            .is_ok()
+            {
+                return Ok(stored);
+            }
+        }
+
+        stored.session_token = None;
+        stored.refresh_token = None;
+        stored.token_expires_at = None;
+    }
+
+    if has_usable_account_session(globals, &stored, auth_model.clone()).await {
+        return Ok(stored);
+    }
+
+    if stored
+        .session_token
+        .as_deref()
+        .is_some_and(|token| !token.trim().is_empty())
+    {
+        if let Some(refresh_token) = stored
+            .refresh_token
+            .clone()
+            .filter(|token| !token.trim().is_empty())
+        {
+            if auth::refresh_session(
+                globals.api_base.clone(),
+                auth_model.clone(),
+                &mut stored,
+                &refresh_token,
+            )
+            .await
+            .is_ok()
+                && has_usable_account_session(globals, &stored, auth_model.clone()).await
+            {
+                return Ok(stored);
+            }
+        }
+
+        stored.session_token = None;
+        stored.refresh_token = None;
+        stored.token_expires_at = None;
+    }
+
+    if !onboarding::should_run(&stored) {
+        return Ok(stored);
+    }
+
+    onboarding::run(globals.api_base.clone(), auth_model, stored).await
+}
+
+async fn has_usable_account_session(
+    globals: &GlobalOptions,
+    stored: &Config,
+    model: Option<String>,
+) -> bool {
+    let Some(token) = stored
+        .session_token
+        .clone()
+        .filter(|token| !token.trim().is_empty())
+        .filter(|_| !auth::token_is_expired(stored))
+    else {
+        return false;
+    };
+
+    let Ok(client) = CodeusClient::new(ClientConfig {
+        api_base: resolve_api_base(globals, stored),
+        model: model.unwrap_or_else(|| resolve_model(globals, stored)),
+        token: Some(token),
+    }) else {
+        return false;
+    };
+
+    client.account().await.is_ok()
 }
 
 async fn login(args: LoginArgs) -> Result<()> {
@@ -343,8 +438,8 @@ async fn logout(stored: &Config) -> Result<()> {
         .filter(|t| !t.trim().is_empty())
     {
         let config = ClientConfig {
-            api_base: DEFAULT_API_BASE.to_string(),
-            model: DEFAULT_MODEL.to_string(),
+            api_base: config::effective_api_base(None, stored),
+            model: config::effective_model(None, stored),
             token: Some(token),
         };
         if let Ok(client) = CodeusClient::new(config) {
@@ -1096,32 +1191,15 @@ fn check_config_permissions(
 }
 
 fn resolve_api_base(globals: &GlobalOptions, stored: &Config) -> String {
-    globals
-        .api_base
-        .clone()
-        .or_else(|| stored.api_base.clone())
-        .unwrap_or_else(|| DEFAULT_API_BASE.to_string())
+    config::effective_api_base(globals.api_base.clone(), stored)
 }
 
 fn resolve_model(globals: &GlobalOptions, stored: &Config) -> String {
-    globals
-        .model
-        .clone()
-        .or_else(|| stored.model.clone())
-        .unwrap_or_else(|| DEFAULT_MODEL.to_string())
+    config::effective_model(globals.model.clone(), stored)
 }
 
 fn resolve_token(globals: &GlobalOptions, stored: &Config) -> Option<String> {
-    globals
-        .token
-        .clone()
-        .filter(|token| !token.trim().is_empty())
-        .or_else(|| {
-            stored
-                .session_token
-                .clone()
-                .filter(|token| !token.trim().is_empty())
-        })
+    config::effective_session_token(globals.token.clone(), stored)
 }
 
 fn resolve_permission_mode(globals: &GlobalOptions, stored: &Config) -> PermissionMode {

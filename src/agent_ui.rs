@@ -95,7 +95,7 @@ impl<'a> TurnRenderer<'a> {
 
         self.spinner_frame = (self.spinner_frame + 1) % SPINNER_FRAMES.len();
         // Rotate the flavor message every N spinner frames
-        if self.spinner_frame % FRAMES_PER_FLAVOR == 0 {
+        if self.spinner_frame.is_multiple_of(FRAMES_PER_FLAVOR) {
             self.flavor_index = (self.flavor_index + 1) % FLAVOR_MESSAGES.len();
         }
         self.clear_spinner_line();

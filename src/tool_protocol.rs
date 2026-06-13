@@ -46,18 +46,15 @@ pub async fn execute_tool_call(
             }
             _ => format!("{}", call.args),
         };
-        match approval.check(&call.name, safety, &description)? {
-            ApprovalDecision::Denied => {
-                return Ok(denied(
-                    &call.name,
-                    &call.args,
-                    &format!(
-                        "Action denied by approval policy (mode: {}). Use --approval-mode auto-edit or full-auto to change.",
-                        approval.mode()
-                    ),
-                ));
-            }
-            _ => {}
+        if approval.check(&call.name, safety, &description)? == ApprovalDecision::Denied {
+            return Ok(denied(
+                &call.name,
+                &call.args,
+                &format!(
+                    "Action denied by approval policy (mode: {}). Use --approval-mode auto-edit or full-auto to change.",
+                    approval.mode()
+                ),
+            ));
         }
     }
 

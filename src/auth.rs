@@ -1,5 +1,5 @@
 use crate::api::{ClientConfig, CodeusClient, DeviceAuthorization, DeviceTokenStatus, TokenSet};
-use crate::config::{Config, DEFAULT_API_BASE, DEFAULT_MODEL};
+use crate::config::{self, Config};
 use crate::terminal::Terminal;
 use anyhow::{bail, Context, Result};
 use std::io::{self, IsTerminal, Write};
@@ -22,14 +22,14 @@ pub async fn login_with_token(token: String) -> Result<()> {
 }
 
 pub async fn login_with_browser(
-    _api_base: Option<String>,
-    _model: Option<String>,
+    api_base: Option<String>,
+    model: Option<String>,
     stored: &Config,
     no_browser: bool,
 ) -> Result<Config> {
     let auth_client = CodeusClient::new(ClientConfig {
-        api_base: DEFAULT_API_BASE.to_string(),
-        model: DEFAULT_MODEL.to_string(),
+        api_base: config::effective_api_base(api_base, stored),
+        model: config::effective_model(model, stored),
         token: None,
     })?;
 
@@ -44,14 +44,14 @@ pub async fn login_with_browser(
 }
 
 pub async fn refresh_session(
-    _api_base: Option<String>,
-    _model: Option<String>,
+    api_base: Option<String>,
+    model: Option<String>,
     config: &mut Config,
     refresh_token: &str,
 ) -> Result<String> {
     let client = CodeusClient::new(ClientConfig {
-        api_base: DEFAULT_API_BASE.to_string(),
-        model: DEFAULT_MODEL.to_string(),
+        api_base: config::effective_api_base(api_base, config),
+        model: config::effective_model(model, config),
         token: None,
     })?;
 
@@ -152,7 +152,7 @@ async fn wait_for_device_token(
         handle_wait_key(url)?;
 
         if tokio::time::Instant::now() >= next_poll {
-            match client.poll_device_token(&auth.device_code).await? {
+            match client.poll_device_authorization(auth).await? {
                 DeviceTokenStatus::Authorized(token) => return Ok(token),
                 DeviceTokenStatus::Pending => {}
                 DeviceTokenStatus::SlowDown => interval += Duration::from_secs(5),
