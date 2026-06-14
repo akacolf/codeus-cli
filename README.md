@@ -245,10 +245,11 @@ Required standalone proxy environment variables:
 ```bash
 CODEUS_AUTH_BASE=https://your-qc-auth-service.example.com
 AI_GATEWAY_API_KEY=your-vercel-ai-gateway-key
-CODEUS_CHAT_BASE=https://your-openai-compatible-llm-gateway.example.com/v1
 ```
 
-For chat completions, the standalone proxy tries Vercel AI Gateway first so the deployment can consume its included AI Gateway credits before falling back to the configured LLM gateway. The Vercel gateway uses `https://ai-gateway.vercel.sh/v1` by default and authenticates with `AI_GATEWAY_API_KEY` or `VERCEL_OIDC_TOKEN`. The fallback LLM gateway uses `CODEUS_CHAT_BASE` or `CODEUS_CHAT_COMPLETIONS_URL`. If that fallback gateway requires its own upstream credential, provide it as `CODEUS_CHAT_API_KEY`; otherwise omit it and the user's Codeus bearer token is forwarded to the configured fallback gateway.
+For chat completions, the standalone proxy uses Vercel AI Gateway by default. The Vercel gateway uses `https://ai-gateway.vercel.sh/v1` by default and authenticates with `AI_GATEWAY_API_KEY` or `VERCEL_OIDC_TOKEN`. If AI Gateway returns a transient provider/server error for a non-default model, the proxy retries once with the default Sonnet model before returning an error.
+
+Legacy LLM gateway routing is opt-in only. To enable it, set `CODEUS_ENABLE_LEGACY_LLM_GATEWAY=1` plus `CODEUS_CHAT_BASE` or `CODEUS_CHAT_COMPLETIONS_URL`. If that legacy gateway requires its own upstream credential, provide it as `CODEUS_CHAT_API_KEY`; otherwise omit it and the user's Codeus bearer token is forwarded.
 
 For browser login, the proxy tries the website-style device-link paths first:
 
@@ -279,6 +280,7 @@ CODEUS_ACCOUNT_URL=https://your-qc-auth-service.example.com/account
 CODEUS_USAGE_URL=https://your-qc-auth-service.example.com/usage
 CODEUS_VERCEL_AI_GATEWAY_BASE=https://ai-gateway.vercel.sh/v1
 CODEUS_VERCEL_AI_GATEWAY_CHAT_COMPLETIONS_URL=https://ai-gateway.vercel.sh/v1/chat/completions
+CODEUS_ENABLE_LEGACY_LLM_GATEWAY=1
 CODEUS_CHAT_COMPLETIONS_URL=https://your-openai-compatible-llm-gateway.example.com/v1/chat/completions
 ```
 
@@ -290,8 +292,6 @@ CODEUS_OAUTH_SCOPE="chat account usage"
 CODEUS_CHAT_API_KEY=optional-server-side-llm-gateway-key
 CODEUS_ACCOUNT_BASE=https://your-qc-account-service.example.com
 ```
-
-If `AI_GATEWAY_API_KEY` or `VERCEL_OIDC_TOKEN` is set, Vercel sends chat traffic to AI Gateway first. If AI Gateway returns a credit, rate-limit, or upstream availability status such as 402, 429, or 5xx, the proxy retries against the LLM gateway. If `CODEUS_CHAT_API_KEY` is set for the LLM gateway, Vercel sends it to that upstream and forwards the user's Codeus session as `x-codeus-session-token`. If it is not set, Vercel forwards the user's bearer token as `Authorization` to the configured fallback gateway.
 
 ## Roadmap
 

@@ -1,21 +1,23 @@
 use crate::terminal::Terminal;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::terminal;
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const SPINNER_FRAMES: &[&str] = &["✶", "✷", "✸", "✹", "✺", "✹", "✸", "✷"];
 const FLAVOR_MESSAGES: &[&str] = &[
-    "Grooving...",
+    "Reading context...",
     "Thinking...",
-    "Processing...",
-    "Analyzing...",
-    "Checking context...",
-    "Planning next step...",
+    "Making a plan...",
+    "Checking the workspace...",
+    "Preparing tools...",
+    "Shaping the answer...",
 ];
 /// How many spinner frames before rotating to the next flavor message.
 const FRAMES_PER_FLAVOR: usize = 20;
+const DEFAULT_STREAM_WIDTH: usize = 100;
 
 pub struct TurnRenderer<'a> {
     terminal: &'a Terminal,
@@ -29,6 +31,8 @@ pub struct TurnRenderer<'a> {
     prompt_text: String,
     thinking_visible: bool,
     status_block_rendered: bool,
+    output_column: usize,
+    stream_started: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +56,8 @@ impl<'a> TurnRenderer<'a> {
             prompt_text: prompt.to_string(),
             thinking_visible: true,
             status_block_rendered: false,
+            output_column: 0,
+            stream_started: false,
         }
     }
 
@@ -81,10 +87,16 @@ impl<'a> TurnRenderer<'a> {
             self.transition_to_streaming();
         }
 
-        // Write the delta content directly
+        let delta = self.display_delta(delta);
+        if delta.is_empty() {
+            return;
+        }
+
+        let width = stream_width();
+        let wrapped = wrap_stream_delta(delta, &mut self.output_column, width);
         let stdout = io::stdout();
         let mut out = stdout.lock();
-        let _ = write!(out, "{delta}");
+        let _ = write!(out, "{wrapped}");
         let _ = out.flush();
     }
 
@@ -199,6 +211,8 @@ impl<'a> TurnRenderer<'a> {
     fn transition_to_streaming(&mut self) {
         self.first_content_at = Some(Instant::now());
         self.clear_status_block();
+        self.output_column = 0;
+        self.stream_started = false;
 
         // Show thinking time summary
         let thinking_secs = self.started.elapsed().as_secs_f64();
@@ -235,13 +249,15 @@ impl<'a> TurnRenderer<'a> {
             "esc to interrupt".to_string()
         };
 
-        print!(
-            "\r{}  {} {} ({})\x1b[K",
+        let width = stream_width();
+        let status = format!(
+            "{}  {} {} ({})",
             self.terminal.thinking_indicator(lead),
             self.terminal.spinner_text(&format!("{frame}")),
             self.terminal.spinner_text(flavor),
             self.terminal.token_stats(&interrupt_hint)
         );
+        print!("\r{}\x1b[K", truncate_plain_status(&status, width));
         let _ = io::stdout().flush();
         self.status_block_rendered = true;
     }
@@ -254,5 +270,135 @@ impl<'a> TurnRenderer<'a> {
             print!("\r\x1b[K");
         }
         let _ = io::stdout().flush();
+    }
+
+    fn display_delta<'d>(&mut self, delta: &'d str) -> &'d str {
+        if self.stream_started {
+            return delta;
+        }
+
+        let trimmed = delta.trim_start_matches([' ', '\t', '\r', '\n']);
+        if !trimmed.is_empty() {
+            self.stream_started = true;
+        }
+        trimmed
+    }
+}
+
+fn stream_width() -> usize {
+    terminal::size()
+        .ok()
+        .map(|(width, _)| usize::from(width).saturating_sub(1).max(1))
+        .unwrap_or(DEFAULT_STREAM_WIDTH)
+}
+
+fn wrap_stream_delta(delta: &str, column: &mut usize, width: usize) -> String {
+    let width = width.max(1);
+    let mut output = String::with_capacity(delta.len());
+
+    for character in delta.chars() {
+        match character {
+            '\r' => {
+                output.push(character);
+                *column = 0;
+            }
+            '\n' => {
+                output.push(character);
+                *column = 0;
+            }
+            _ => {
+                if *column >= width {
+                    output.push('\n');
+                    *column = 0;
+                    if character == ' ' {
+                        continue;
+                    }
+                }
+                output.push(character);
+                *column += 1;
+            }
+        }
+    }
+
+    output
+}
+
+fn truncate_plain_status(value: &str, width: usize) -> String {
+    if visible_len(value) <= width {
+        return value.to_string();
+    }
+
+    let mut output = String::new();
+    let mut visible = 0usize;
+    let mut chars = value.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character == '\x1b' {
+            output.push(character);
+            for next in chars.by_ref() {
+                output.push(next);
+                if next == 'm' {
+                    break;
+                }
+            }
+            continue;
+        }
+        if visible >= width.saturating_sub(1) {
+            break;
+        }
+        output.push(character);
+        visible += 1;
+    }
+    output.push('…');
+    output.push_str("\x1b[0m");
+    output
+}
+
+fn visible_len(value: &str) -> usize {
+    let mut len = 0usize;
+    let mut chars = value.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character == '\x1b' {
+            for next in chars.by_ref() {
+                if next == 'm' {
+                    break;
+                }
+            }
+        } else {
+            len += 1;
+        }
+    }
+    len
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wraps_stream_delta_at_terminal_width() {
+        let mut column = 0;
+        let wrapped = wrap_stream_delta("hello world", &mut column, 6);
+
+        assert_eq!(wrapped, "hello \nworld");
+        assert_eq!(column, 5);
+    }
+
+    #[test]
+    fn wraps_stream_delta_across_multiple_chunks() {
+        let mut column = 4;
+        let wrapped = wrap_stream_delta(" world", &mut column, 6);
+
+        assert_eq!(wrapped, " w\norld");
+        assert_eq!(column, 4);
+    }
+
+    #[test]
+    fn truncates_status_without_counting_ansi_codes() {
+        let status = "\x1b[2mThinking\x1b[0m with a long tail";
+        let truncated = truncate_plain_status(status, 12);
+
+        assert!(truncated.contains("\x1b[2m"));
+        assert!(truncated.ends_with("\x1b[0m"));
+        assert_eq!(visible_len(&truncated), 12);
     }
 }

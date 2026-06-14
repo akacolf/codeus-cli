@@ -654,8 +654,9 @@ fn redact_device_code(value: &str) -> String {
 }
 
 fn chat_gateway_error(status: StatusCode, text: &str, detail: &str) -> String {
+    let parsed = serde_json::from_str::<Value>(text).ok();
     if status == StatusCode::PAYMENT_REQUIRED {
-        if let Ok(value) = serde_json::from_str::<Value>(text) {
+        if let Some(value) = parsed.as_ref() {
             let is_x402 = value.get("x402Version").is_some()
                 || value
                     .get("error")
@@ -684,7 +685,39 @@ fn chat_gateway_error(status: StatusCode, text: &str, detail: &str) -> String {
         }
     }
 
-    format!("chat gateway returned {status}: {}{detail}", text.trim())
+    let message = parsed
+        .as_ref()
+        .and_then(chat_error_message)
+        .unwrap_or_else(|| text.trim().to_string());
+    let hint = if status.is_server_error() {
+        " The proxy retried eligible Vercel AI Gateway failures with the default model; check API project logs if this persists."
+    } else {
+        ""
+    };
+
+    format!("chat gateway returned {status}: {message}{hint}{detail}")
+}
+
+fn chat_error_message(value: &Value) -> Option<String> {
+    let error = value.get("error")?;
+    if let Some(message) = error.as_str() {
+        return Some(message.trim().to_string()).filter(|message| !message.is_empty());
+    }
+
+    let message = error
+        .get("message")
+        .or_else(|| error.get("error_description"))
+        .and_then(Value::as_str)?;
+    let code = error
+        .get("code")
+        .and_then(Value::as_str)
+        .filter(|code| !code.trim().is_empty());
+
+    Some(match code {
+        Some(code) => format!("{} ({code})", message.trim()),
+        None => message.trim().to_string(),
+    })
+    .filter(|message| !message.is_empty())
 }
 
 fn find_sse_boundary(buffer: &str) -> Option<(usize, usize)> {
@@ -1026,6 +1059,25 @@ mod tests {
         assert!(error.contains("Top up QC Codeus balance"));
         assert!(error.contains("$5.00"));
         assert!(!error.contains("x402Version"));
+    }
+
+    #[test]
+    fn formats_openai_style_gateway_error_without_raw_json() {
+        let text = json!({
+            "error": {
+                "message": "Internal Server Error",
+                "type": "api_error",
+                "param": null,
+                "code": null
+            }
+        })
+        .to_string();
+
+        let error = chat_gateway_error(StatusCode::INTERNAL_SERVER_ERROR, &text, "");
+
+        assert!(error.contains("Internal Server Error"));
+        assert!(error.contains("proxy retried"));
+        assert!(!error.contains("\"error\""));
     }
 
     #[test]

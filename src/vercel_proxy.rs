@@ -9,6 +9,7 @@ const BODY_LIMIT: usize = 4 * 1024 * 1024;
 const DEVICE_CODE_PATHS: &[&str] = &["device/link/init", "oauth/device/code", "device/code"];
 const DEVICE_TOKEN_PATHS: &[&str] = &["device/link/poll", "oauth/token", "device/token"];
 const REFRESH_PATHS: &[&str] = &["oauth/token", "refresh"];
+const DEFAULT_CHAT_MODEL: &str = "anthropic/claude-sonnet-4.6";
 
 #[derive(Debug)]
 struct ProxyError {
@@ -336,7 +337,7 @@ async fn post_chat_with_fallback(
             }
         }
 
-        let response = match builder.json(&body).send().await {
+        let mut response = match builder.json(&body).send().await {
             Ok(response) => response,
             Err(error) if index < last_index => {
                 last_failure = Some(format!("{} request failed: {error}", upstream.name));
@@ -344,6 +345,26 @@ async fn post_chat_with_fallback(
             }
             Err(error) => return Err(upstream_request_error(error)),
         };
+
+        if should_retry_default_model(&upstream, response.status(), &body) {
+            let retry_body = body_with_default_model(&body);
+            match post_chat(&client, &upstream, user_token.as_deref(), &retry_body).await {
+                Ok(retry) => {
+                    if retry.status().is_success() {
+                        return Ok(retry);
+                    }
+                    response = retry;
+                }
+                Err(error) if index < last_index => {
+                    last_failure = Some(format!(
+                        "{} default-model retry failed: {error}",
+                        upstream.name
+                    ));
+                    continue;
+                }
+                Err(error) => return Err(upstream_request_error(error)),
+            }
+        }
 
         if response.status().is_success()
             || index == last_index
@@ -366,6 +387,52 @@ async fn post_chat_with_fallback(
         "upstream_request_failed",
         last_failure.unwrap_or_else(|| "No chat upstreams were available.".to_string()),
     ))
+}
+
+async fn post_chat(
+    client: &reqwest::Client,
+    upstream: &ChatUpstream,
+    user_token: Option<&str>,
+    body: &Value,
+) -> Result<reqwest::Response, reqwest::Error> {
+    let mut builder = client
+        .post(&upstream.url)
+        .header(header::CONTENT_TYPE.as_str(), "application/json");
+
+    match &upstream.auth {
+        ChatAuth::ServerToken(token) => {
+            builder = builder.bearer_auth(token);
+            if let Some(user_token) = user_token {
+                builder = builder.header("x-codeus-session-token", user_token);
+            }
+        }
+        ChatAuth::UserBearer => {
+            if let Some(user_token) = user_token {
+                builder = builder.bearer_auth(user_token);
+            }
+        }
+    }
+
+    builder.json(body).send().await
+}
+
+fn should_retry_default_model(
+    upstream: &ChatUpstream,
+    status: reqwest::StatusCode,
+    body: &Value,
+) -> bool {
+    upstream.name == "vercel_ai_gateway"
+        && status.is_server_error()
+        && body
+            .get("model")
+            .and_then(Value::as_str)
+            .is_some_and(|model| model != DEFAULT_CHAT_MODEL)
+}
+
+fn body_with_default_model(body: &Value) -> Value {
+    let mut retry = body.clone();
+    retry["model"] = Value::String(DEFAULT_CHAT_MODEL.to_string());
+    retry
 }
 
 async fn proxy_get(url: String, token: String) -> Result<Response<Body>, ProxyError> {
@@ -500,17 +567,19 @@ where
         });
     }
 
-    if let Some(url) = lookup("CODEUS_CHAT_COMPLETIONS_URL")
-        .or_else(|| lookup("CODEUS_CHAT_BASE").map(|base| upstream_url(&base, "chat/completions")))
-    {
-        let auth = lookup("CODEUS_CHAT_API_KEY")
-            .map(ChatAuth::ServerToken)
-            .unwrap_or(ChatAuth::UserBearer);
-        candidates.push(ChatUpstream {
-            name: "llm_gateway",
-            url,
-            auth,
-        });
+    if env_flag(&mut lookup, "CODEUS_ENABLE_LEGACY_LLM_GATEWAY") {
+        if let Some(url) = lookup("CODEUS_CHAT_COMPLETIONS_URL").or_else(|| {
+            lookup("CODEUS_CHAT_BASE").map(|base| upstream_url(&base, "chat/completions"))
+        }) {
+            let auth = lookup("CODEUS_CHAT_API_KEY")
+                .map(ChatAuth::ServerToken)
+                .unwrap_or(ChatAuth::UserBearer);
+            candidates.push(ChatUpstream {
+                name: "llm_gateway",
+                url,
+                auth,
+            });
+        }
     }
 
     if candidates.is_empty() {
@@ -522,11 +591,25 @@ where
         return Err(ProxyError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             "missing_server_config",
-            format!("{detail} Configure AI_GATEWAY_API_KEY/VERCEL_OIDC_TOKEN for Vercel AI Gateway or CODEUS_CHAT_BASE/CODEUS_CHAT_COMPLETIONS_URL for the LLM gateway."),
+            format!("{detail} Configure AI_GATEWAY_API_KEY/VERCEL_OIDC_TOKEN for Vercel AI Gateway. Legacy LLM gateway routing requires CODEUS_ENABLE_LEGACY_LLM_GATEWAY=1 plus CODEUS_CHAT_BASE/CODEUS_CHAT_COMPLETIONS_URL."),
         ));
     }
 
     Ok(candidates)
+}
+
+fn env_flag<F>(lookup: &mut F, name: &str) -> bool
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    matches!(
+        lookup(name)
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
 }
 
 fn configured_account_url(override_name: &str, path: &str) -> Result<String, ProxyError> {
@@ -660,7 +743,7 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
-    fn chat_upstreams_prefer_vercel_then_llm_gateway() {
+    fn chat_upstreams_use_vercel_without_implicit_llm_fallback() {
         let env = HashMap::from([
             ("AI_GATEWAY_API_KEY", "vercel-key"),
             ("CODEUS_CHAT_BASE", "https://llm.example/v1"),
@@ -672,7 +755,7 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].name, "vercel_ai_gateway");
         assert_eq!(
             candidates[0].url,
@@ -682,6 +765,24 @@ mod tests {
             candidates[0].auth,
             ChatAuth::ServerToken("vercel-key".to_string())
         );
+    }
+
+    #[test]
+    fn chat_upstreams_can_opt_into_legacy_llm_gateway_fallback() {
+        let env = HashMap::from([
+            ("AI_GATEWAY_API_KEY", "vercel-key"),
+            ("CODEUS_CHAT_BASE", "https://llm.example/v1"),
+            ("CODEUS_CHAT_API_KEY", "llm-key"),
+            ("CODEUS_ENABLE_LEGACY_LLM_GATEWAY", "1"),
+        ]);
+
+        let candidates = chat_upstream_candidates_from_lookup(false, |key| {
+            env.get(key).map(|value| value.to_string())
+        })
+        .unwrap();
+
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].name, "vercel_ai_gateway");
         assert_eq!(candidates[1].name, "llm_gateway");
         assert_eq!(candidates[1].url, "https://llm.example/v1/chat/completions");
         assert_eq!(
@@ -692,7 +793,10 @@ mod tests {
 
     #[test]
     fn chat_upstreams_keep_existing_llm_gateway_without_vercel_key() {
-        let env = HashMap::from([("CODEUS_CHAT_COMPLETIONS_URL", "https://llm.example/chat")]);
+        let env = HashMap::from([
+            ("CODEUS_CHAT_COMPLETIONS_URL", "https://llm.example/chat"),
+            ("CODEUS_ENABLE_LEGACY_LLM_GATEWAY", "true"),
+        ]);
 
         let candidates = chat_upstream_candidates_from_lookup(true, |key| {
             env.get(key).map(|value| value.to_string())
@@ -703,6 +807,57 @@ mod tests {
         assert_eq!(candidates[0].name, "llm_gateway");
         assert_eq!(candidates[0].url, "https://llm.example/chat");
         assert_eq!(candidates[0].auth, ChatAuth::UserBearer);
+    }
+
+    #[test]
+    fn chat_upstreams_reject_legacy_gateway_without_opt_in() {
+        let env = HashMap::from([("CODEUS_CHAT_COMPLETIONS_URL", "https://llm.example/chat")]);
+
+        let error = chat_upstream_candidates_from_lookup(true, |key| {
+            env.get(key).map(|value| value.to_string())
+        })
+        .unwrap_err();
+
+        assert_eq!(error.code, "missing_server_config");
+        assert!(error.message.contains("Vercel AI Gateway"));
+    }
+
+    #[test]
+    fn vercel_gateway_5xx_retries_non_default_model_with_default_model() {
+        let upstream = ChatUpstream {
+            name: "vercel_ai_gateway",
+            url: "https://ai-gateway.vercel.sh/v1/chat/completions".to_string(),
+            auth: ChatAuth::ServerToken("key".to_string()),
+        };
+        let body = json!({ "model": "anthropic/claude-haiku-4.5" });
+
+        assert!(should_retry_default_model(
+            &upstream,
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            &body
+        ));
+        assert_eq!(
+            body_with_default_model(&body)
+                .get("model")
+                .and_then(Value::as_str),
+            Some(DEFAULT_CHAT_MODEL)
+        );
+    }
+
+    #[test]
+    fn vercel_gateway_does_not_retry_default_model_again() {
+        let upstream = ChatUpstream {
+            name: "vercel_ai_gateway",
+            url: "https://ai-gateway.vercel.sh/v1/chat/completions".to_string(),
+            auth: ChatAuth::ServerToken("key".to_string()),
+        };
+        let body = json!({ "model": DEFAULT_CHAT_MODEL });
+
+        assert!(!should_retry_default_model(
+            &upstream,
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            &body
+        ));
     }
 
     #[test]

@@ -198,6 +198,7 @@ async fn run_agent_turn(
             let config = Config::load()?;
             for tool_call in response.tool_calls {
                 let call = tool_protocol::from_chat_tool_call(&tool_call)?;
+                print_tool_started(terminal, &call);
                 let observation =
                     tool_protocol::execute_tool_call(session.cwd(), &config, &call, &mut approval)
                         .await?;
@@ -228,6 +229,7 @@ async fn run_agent_turn(
         match tagged_tool_call {
             Some(call) => {
                 let config = Config::load()?;
+                print_tool_started(terminal, &call);
                 let observation =
                     tool_protocol::execute_tool_call(session.cwd(), &config, &call, &mut approval)
                         .await?;
@@ -609,6 +611,16 @@ fn print_observation(terminal: &Terminal, observation: &ToolObservation) {
     );
 }
 
+fn print_tool_started(terminal: &Terminal, call: &tool_protocol::ModelToolCall) {
+    println!();
+    println!(
+        "{} {}",
+        terminal.success("●"),
+        terminal.title(&tool_call_title(&call.name, &call.args))
+    );
+    println!("  {} {}", terminal.muted("└"), terminal.muted("Running..."));
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CompactToolDisplay {
     title: String,
@@ -616,39 +628,7 @@ struct CompactToolDisplay {
 }
 
 fn compact_tool_display(observation: &ToolObservation) -> CompactToolDisplay {
-    let title = match observation.name.as_str() {
-        "read_file" => format!(
-            "Read({})",
-            string_arg(&observation.args, "path").unwrap_or("?")
-        ),
-        "search_text" => format!(
-            "Search(pattern: {})",
-            quoted_arg(&observation.args, "pattern").unwrap_or_else(|| "\"?\"".to_string())
-        ),
-        "list_files" => {
-            let path = string_arg(&observation.args, "path")
-                .or_else(|| string_arg(&observation.args, "root"))
-                .unwrap_or(".");
-            format!("List({path})")
-        }
-        "replace_in_file" => format!(
-            "Edit({})",
-            string_arg(&observation.args, "path").unwrap_or("?")
-        ),
-        "apply_patch" => {
-            let count = observation
-                .args
-                .get("operation_count")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0);
-            format!("Edit({count} operations)")
-        }
-        "run_command" => format!(
-            "Bash({})",
-            string_arg(&observation.args, "command").unwrap_or("?")
-        ),
-        other => format!("Tool({other})"),
-    };
+    let title = tool_call_title(&observation.name, &observation.args);
 
     let detail = match observation.status {
         ToolStatus::Success => success_tool_detail(observation),
@@ -657,6 +637,34 @@ fn compact_tool_display(observation: &ToolObservation) -> CompactToolDisplay {
     };
 
     CompactToolDisplay { title, detail }
+}
+
+fn tool_call_title(name: &str, args: &serde_json::Value) -> String {
+    match name {
+        "read_file" => format!("Read({})", string_arg(args, "path").unwrap_or("?")),
+        "search_text" => format!(
+            "Search(pattern: {})",
+            quoted_arg(args, "pattern").unwrap_or_else(|| "\"?\"".to_string())
+        ),
+        "list_files" => {
+            let path = string_arg(args, "path")
+                .or_else(|| string_arg(args, "root"))
+                .unwrap_or(".");
+            format!("List({path})")
+        }
+        "replace_in_file" => format!("Edit({})", string_arg(args, "path").unwrap_or("?")),
+        "apply_patch" => {
+            let count = args
+                .get("operation_count")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            format!("Edit({count} operations)")
+        }
+        "run_command" => format!("Bash({})", string_arg(args, "command").unwrap_or("?")),
+        "git_status" => "Bash(git status --short)".to_string(),
+        "git_diff" => "Bash(git diff --stat)".to_string(),
+        other => format!("Tool({other})"),
+    }
 }
 
 fn success_tool_detail(observation: &ToolObservation) -> Option<String> {
