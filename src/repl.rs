@@ -193,24 +193,40 @@ async fn run_agent_turn(
             }),
         );
 
-        match tool_protocol::parse_tool_call(&response.text) {
-            _ if !response.tool_calls.is_empty() => {
-                session.record_assistant_tool_calls(response.tool_calls.clone())?;
-                let config = Config::load()?;
-                for tool_call in response.tool_calls {
-                    let call = tool_protocol::from_chat_tool_call(&tool_call)?;
-                    let observation = tool_protocol::execute_tool_call(
-                        session.cwd(),
-                        &config,
-                        &call,
-                        &mut approval,
-                    )
-                    .await?;
-                    print_observation(terminal, &observation);
-                    session.record_tool_result(tool_call.id, observation.as_context_message())?;
-                }
+        if !response.tool_calls.is_empty() {
+            session.record_assistant_tool_calls(response.tool_calls.clone())?;
+            let config = Config::load()?;
+            for tool_call in response.tool_calls {
+                let call = tool_protocol::from_chat_tool_call(&tool_call)?;
+                let observation =
+                    tool_protocol::execute_tool_call(session.cwd(), &config, &call, &mut approval)
+                        .await?;
+                print_observation(terminal, &observation);
+                session.record_tool_result(tool_call.id, observation.as_context_message())?;
             }
-            Ok(Some(call)) => {
+            continue;
+        }
+
+        let tagged_tool_call = match tool_protocol::parse_tool_call(&response.text)? {
+            Some(call) => Some(call),
+            None => match tool_protocol::parse_leading_tool_call(&response.text) {
+                Ok(call) => call,
+                Err(error) => {
+                    if !response.printed && !response.text.trim().is_empty() {
+                        println!("{} {}", terminal.accent("QC Codeus"), response.text);
+                    }
+                    println!(
+                        "{} Could not parse model tool call: {error}",
+                        terminal.warn("•")
+                    );
+                    session.record_assistant(response.text)?;
+                    return Ok(());
+                }
+            },
+        };
+
+        match tagged_tool_call {
+            Some(call) => {
                 let config = Config::load()?;
                 let observation =
                     tool_protocol::execute_tool_call(session.cwd(), &config, &call, &mut approval)
@@ -218,21 +234,10 @@ async fn run_agent_turn(
                 print_observation(terminal, &observation);
                 session.record_tool(&observation)?;
             }
-            Ok(None) => {
+            None => {
                 if !response.printed && !response.text.trim().is_empty() {
                     println!("{} {}", terminal.accent("QC Codeus"), response.text);
                 }
-                session.record_assistant(response.text)?;
-                return Ok(());
-            }
-            Err(error) => {
-                if !response.printed && !response.text.trim().is_empty() {
-                    println!("{} {}", terminal.accent("QC Codeus"), response.text);
-                }
-                println!(
-                    "{} Could not parse model tool call: {error}",
-                    terminal.warn("•")
-                );
                 session.record_assistant(response.text)?;
                 return Ok(());
             }
@@ -293,12 +298,21 @@ async fn stream_model_response(
 
     match completion {
         Ok(completion) => {
-            renderer.finish();
             let text = if text.is_empty() {
                 completion.content.clone()
             } else {
                 text
             };
+            let has_hidden_action = !completion.tool_calls.is_empty()
+                || tool_protocol::parse_leading_tool_call(&text)
+                    .ok()
+                    .flatten()
+                    .is_some();
+            if has_hidden_action {
+                renderer.finish_action();
+            } else {
+                renderer.finish();
+            }
             Ok(ModelResponse {
                 text,
                 printed,

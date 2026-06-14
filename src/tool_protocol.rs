@@ -30,6 +30,19 @@ pub fn parse_tool_call(text: &str) -> Result<Option<ModelToolCall>> {
     Ok(Some(call))
 }
 
+pub fn parse_leading_tool_call(text: &str) -> Result<Option<ModelToolCall>> {
+    let trimmed = text.trim_start();
+    let Some(rest) = trimmed.strip_prefix(TOOL_CALL_OPEN) else {
+        return Ok(None);
+    };
+    let Some((json_text, _trailing)) = rest.split_once(TOOL_CALL_CLOSE) else {
+        return Ok(None);
+    };
+
+    let call = serde_json::from_str(json_text.trim()).context("failed to parse model tool call")?;
+    Ok(Some(call))
+}
+
 pub async fn execute_tool_call(
     cwd: &Path,
     config: &Config,
@@ -179,6 +192,18 @@ mod tests {
 
         assert_eq!(call.name, "read_file");
         assert_eq!(call.args["path"], "README.md");
+    }
+
+    #[test]
+    fn parses_leading_tool_call_with_trailing_markup() {
+        let call = parse_leading_tool_call(
+            r#"<codeus_tool_call>{"name":"list_files","args":{"path":"src"}}</codeus_tool_call><span></span> extra"#,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(call.name, "list_files");
+        assert_eq!(call.args["path"], "src");
     }
 
     #[test]
