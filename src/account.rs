@@ -4,7 +4,7 @@ use serde_json::Value;
 
 pub async fn print_account(client: &CodeusClient) -> Result<()> {
     let account = client.account().await?;
-    println!("QC account");
+    println!("Anaxonic account");
     println!("{}", account_display_summary(&account));
     print_summary_or_json(&account);
 
@@ -35,13 +35,13 @@ fn account_display_summary(value: &Value) -> String {
         .as_deref()
         .is_some_and(|email| email.eq_ignore_ascii_case("colfgg54@gmail.com"))
     {
-        "QC Enterprise".to_string()
+        "Anaxonic Enterprise".to_string()
     } else {
         account_value(
             value,
             &["activePlan", "active_plan", "plan", "subscription"],
         )
-        .unwrap_or_else(|| "QC account".to_string())
+        .unwrap_or_else(|| "Anaxonic account".to_string())
     };
 
     match email {

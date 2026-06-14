@@ -31,7 +31,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Parser)]
 #[command(name = "codeus")]
-#[command(author, version, about = "Terminal-native QC Codeus")]
+#[command(author, version, about = "Terminal-native Anaxonic Codeus")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -66,13 +66,13 @@ enum Command {
     Chat(ChatArgs),
     /// Send one prompt and exit.
     Run(RunArgs),
-    /// Connect Codeus CLI to a QC account.
+    /// Connect Codeus CLI to an Anaxonic account.
     Login(LoginArgs),
     /// Remove the stored session token.
     Logout,
-    /// Show the signed-in QC account and usage information.
+    /// Show the signed-in Anaxonic account and usage information.
     Account,
-    /// Show remaining usage for the signed-in QC account.
+    /// Show remaining usage for the signed-in Anaxonic account.
     Usage,
     /// Run local diagnostics for auth, proxy, config, and workspace health.
     Doctor,
@@ -296,7 +296,7 @@ async fn client_from(
 
     if matches!(auth_mode, AuthMode::Required) && token.is_none() {
         bail!(
-            "No Codeus account is connected. Run `codeus` to open the terminal interface and connect your Quantum Club account."
+            "No Codeus account is connected. Run `codeus` to open the terminal interface and connect your Anaxonic account."
         );
     }
 
@@ -425,7 +425,7 @@ async fn login(args: LoginArgs) -> Result<()> {
     let stored = Config::load()?;
     auth::login_with_browser(globals.api_base, globals.model, &stored, args.no_browser)
         .await
-        .context("browser login could not start. Verify CODEUS_API_BASE points at https://api.quantumclub.sh/v1 or another host exposing the Codeus device-link API")?;
+        .context("browser login could not start. Verify CODEUS_API_BASE points at the Anaxonic Codeus API host and that it exposes the Codeus device-link API")?;
     Ok(())
 }
 
@@ -821,7 +821,7 @@ async fn build_doctor_report(globals: &GlobalOptions, stored: &Config) -> Doctor
                 auth.token_source, auth.token_expired
             )
         } else {
-            "no session token; run `codeus` to connect your Quantum Club account".to_string()
+            "no session token; run `codeus` to connect your Anaxonic account".to_string()
         },
     );
 

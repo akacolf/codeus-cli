@@ -109,7 +109,7 @@ impl ApprovalEngine {
 
         println!();
         println!(
-            "  \x1b[38;2;0;168;204m┌\x1b[0m QC Codeus wants to use: \x1b[1m{tool_name}\x1b[0m"
+            "  \x1b[38;2;0;168;204m┌\x1b[0m Anaxonic Codeus wants to use: \x1b[1m{tool_name}\x1b[0m"
         );
         if !description.is_empty() {
             // Truncate long descriptions

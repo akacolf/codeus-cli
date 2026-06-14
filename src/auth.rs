@@ -123,10 +123,7 @@ fn print_auth_art(terminal: &Terminal) {
         println!("{line}");
     }
     println!();
-    println!(
-        "{}",
-        terminal.title("Sign in with your Quantum Club account")
-    );
+    println!("{}", terminal.title("Sign in with your Anaxonic account"));
     println!("{}", terminal.muted("Complete sign in in your browser."));
     println!();
 }

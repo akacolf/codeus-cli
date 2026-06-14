@@ -265,43 +265,32 @@ impl CodeusClient {
             "accountId": null,
         });
 
-        let mut last_404 = String::new();
-        for path in ["device/link/init", "auth/device/code"] {
-            let url = self.url(path);
-            let response = self
-                .http
-                .post(url)
-                .json(&body)
-                .send()
-                .await
-                .context("failed to start browser login")?;
+        let url = self.url("auth/device/code");
+        let response = self
+            .http
+            .post(url)
+            .json(&body)
+            .send()
+            .await
+            .context("failed to start browser login")?;
 
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            if status == StatusCode::NOT_FOUND {
-                last_404 = text.trim().to_string();
-                continue;
-            }
-            if !status.is_success() {
-                return Err(anyhow!(
-                    "browser login is not available from the proxy ({status}): {}",
-                    text.trim()
-                ));
-            }
-
-            let value: Value =
-                serde_json::from_str(&text).context("failed to parse browser login response")?;
-            let mut auth = parse_device_authorization(value)?;
-            auth.verification_uri = with_cli_client_hint(&auth.verification_uri);
-            auth.verification_uri_complete = auth
-                .verification_uri_complete
-                .map(|url| with_cli_client_hint(&url));
-            return Ok(auth);
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(anyhow!(
+                "browser login is not available from the Anaxonic API ({status}): {}",
+                text.trim()
+            ));
         }
 
-        Err(anyhow!(
-            "browser login route returned 404. The QC website exposes /device/link/init and /device/link/poll through /v1 rewrites; verify the CLI is pointed at https://api.quantumclub.sh/v1 or deploy those routes on the configured API host: {last_404}"
-        ))
+        let value: Value =
+            serde_json::from_str(&text).context("failed to parse browser login response")?;
+        let mut auth = parse_device_authorization(value)?;
+        auth.verification_uri = with_cli_client_hint(&auth.verification_uri);
+        auth.verification_uri_complete = auth
+            .verification_uri_complete
+            .map(|url| with_cli_client_hint(&url));
+        Ok(auth)
     }
 
     pub async fn poll_device_token(&self, device_code: &str) -> Result<DeviceTokenStatus> {
@@ -337,12 +326,11 @@ impl CodeusClient {
         body: &Value,
         poll_url: Option<&str>,
     ) -> Result<DeviceTokenStatus> {
-        let mut last_not_found = String::new();
         let mut urls = Vec::new();
         if let Some(poll_url) = poll_url.filter(|url| !url.trim().is_empty()) {
             urls.push(poll_url.trim().to_string());
         }
-        urls.extend(["device/link/poll", "auth/device/token"].map(|path| self.url(path)));
+        urls.push(self.url("auth/device/token"));
 
         for url in urls {
             let response = self
@@ -362,7 +350,7 @@ impl CodeusClient {
                     return Ok(DeviceTokenStatus::Pending);
                 }
                 let token = parse_token_set(value).with_context(|| {
-                    "browser approval completed, but the QC API did not return a CLI session token"
+                    "browser approval completed, but the Anaxonic API did not return a CLI session token"
                 })?;
                 return Ok(DeviceTokenStatus::Authorized(token));
             }
@@ -379,7 +367,6 @@ impl CodeusClient {
                 };
             }
             if status == StatusCode::NOT_FOUND {
-                last_not_found = text.trim().to_string();
                 continue;
             }
 
@@ -387,7 +374,7 @@ impl CodeusClient {
         }
 
         Err(anyhow!(
-            "browser login failed for device code {} (404): {last_not_found}",
+            "browser login token route returned 404 for device code {}",
             redact_device_code(device_code)
         ))
     }
@@ -488,7 +475,7 @@ impl CodeusClient {
         if !status.is_success() {
             let detail = text.trim();
             if status == StatusCode::UNAUTHORIZED {
-                bail!("not signed in; run `codeus` to connect your Quantum Club account");
+                bail!("not signed in; run `codeus` to connect your Anaxonic account");
             }
             bail!(
                 "proxy returned {status}: {}",
@@ -667,7 +654,7 @@ fn chat_gateway_error(status: StatusCode, text: &str, detail: &str) -> String {
                     .get("resource")
                     .and_then(|resource| resource.get("description"))
                     .and_then(Value::as_str)
-                    .unwrap_or("Top up QC Codeus balance");
+                    .unwrap_or("Top up Anaxonic Codeus balance");
                 let price = value
                     .get("accepts")
                     .and_then(Value::as_array)
@@ -1046,7 +1033,7 @@ mod tests {
             "x402Version": 2,
             "error": "Payment required",
             "resource": {
-                "description": "Top up QC Codeus balance with USDC on Base or Solana"
+                "description": "Top up Anaxonic Codeus balance with USDC on Base or Solana"
             },
             "accepts": [{
                 "extra": { "price": "$5.00" }
@@ -1056,7 +1043,7 @@ mod tests {
 
         let error = chat_gateway_error(StatusCode::PAYMENT_REQUIRED, &text, "");
 
-        assert!(error.contains("Top up QC Codeus balance"));
+        assert!(error.contains("Top up Anaxonic Codeus balance"));
         assert!(error.contains("$5.00"));
         assert!(!error.contains("x402Version"));
     }

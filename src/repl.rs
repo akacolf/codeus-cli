@@ -138,7 +138,7 @@ pub async fn run(mut client: CodeusClient) -> Result<()> {
         }
 
         if !account.is_connected() {
-            println!("{} No QC account is connected.", terminal.warn("•"));
+            println!("{} No Anaxonic account is connected.", terminal.warn("•"));
             continue;
         }
 
@@ -214,7 +214,7 @@ async fn run_agent_turn(
                 Ok(call) => call,
                 Err(error) => {
                     if !response.printed && !response.text.trim().is_empty() {
-                        println!("{} {}", terminal.accent("QC Codeus"), response.text);
+                        println!("{} {}", terminal.accent("Anaxonic Codeus"), response.text);
                     }
                     println!(
                         "{} Could not parse model tool call: {error}",
@@ -238,7 +238,7 @@ async fn run_agent_turn(
             }
             None => {
                 if !response.printed && !response.text.trim().is_empty() {
-                    println!("{} {}", terminal.accent("QC Codeus"), response.text);
+                    println!("{} {}", terminal.accent("Anaxonic Codeus"), response.text);
                 }
                 session.record_assistant(response.text)?;
                 return Ok(());
@@ -569,8 +569,9 @@ fn print_signed_out_intro(terminal: &Terminal) {
     println!("{}", terminal.title("Let's get you started."));
     println!(
         "{}",
-        terminal
-            .muted("Connect your QC account from the hosted account flow, then reopen Codeus.",)
+        terminal.muted(
+            "Connect your Anaxonic account from the hosted account flow, then reopen Codeus.",
+        )
     );
     println!();
 }
@@ -1079,13 +1080,13 @@ async fn account_summary(client: &CodeusClient) -> AccountSummary {
         .as_deref()
         .is_some_and(|email| email.eq_ignore_ascii_case("colfgg54@gmail.com"))
     {
-        "QC Enterprise".to_string()
+        "Anaxonic Enterprise".to_string()
     } else {
         account_value(
             &account,
             &["activePlan", "active_plan", "plan", "subscription"],
         )
-        .unwrap_or_else(|| "QC account".to_string())
+        .unwrap_or_else(|| "Anaxonic account".to_string())
     };
 
     AccountSummary { plan, email }
@@ -1227,7 +1228,7 @@ fn status_rows(account: &AccountSummary, session: &Session, model: &str) -> Vec<
     let turns = session.transcript_len();
     vec![
         input::StatusRow {
-            label: "QC account".to_string(),
+            label: "Anaxonic account".to_string(),
             value: account.display_value(),
         },
         input::StatusRow {
@@ -1316,7 +1317,7 @@ fn print_intro(terminal: &Terminal, model: &str, subscription: &str, cwd: &str) 
     let text = [
         format!(
             "{} {}",
-            terminal.title("QC Codeus"),
+            terminal.title("Anaxonic Codeus"),
             terminal.muted(&format!("v{}", env!("CARGO_PKG_VERSION")))
         ),
         terminal.muted(&format!("{} · {}", display_model(model), subscription)),

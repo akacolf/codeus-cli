@@ -5,7 +5,6 @@ use anyhow::{bail, Context, Result};
 #[cfg(unix)]
 use std::io::Read;
 use std::io::{self, IsTerminal, Write};
-use std::process;
 
 pub fn should_run(config: &Config) -> bool {
     !has_current_session(config) && io::stdin().is_terminal() && io::stdout().is_terminal()
@@ -27,11 +26,11 @@ pub async fn run(
     choose_theme(&mut config)?;
     let terminal = Terminal::detect_with_theme(config.theme.as_deref());
 
-    let login_choices = ["Sign in with Quantum Club"];
+    let login_choices = ["Sign in with Anaxonic"];
     let login_choice = select_index(
         &terminal,
         "Sign in to continue",
-        "Connect your Quantum Club account in the browser.",
+        "Connect your Anaxonic account in the browser.",
         &login_choices,
         0,
         SelectorStyle::Login,
@@ -39,35 +38,18 @@ pub async fn run(
     )?;
 
     let Selection::Choice(login_choice) = login_choice;
+    debug_assert_eq!(login_choice, 0);
 
-    match login_choice + 1 {
-        1 => {
-            config.onboarded = Some(true);
-            config.save()?;
-            match auth::login_with_browser(api_base, model, &config, false).await {
-                Ok(mut signed_in) => {
-                    signed_in.onboarded = Some(true);
-                    if signed_in.theme.is_none() {
-                        signed_in.theme = config.theme;
-                    }
-                    signed_in.save()?;
-                    clear_screen();
-                    Ok(signed_in)
-                }
-                Err(_) => {
-                    clear_screen();
-                    println!(
-                        "{}",
-                        terminal.muted(
-                            "Run `codeus` again when you are ready to connect your Quantum Club account."
-                        )
-                    );
-                    process::exit(0);
-                }
-            }
-        }
-        _ => unreachable!("read_choice clamps the selected range"),
+    config.onboarded = Some(true);
+    config.save()?;
+    let mut signed_in = auth::login_with_browser(api_base, model, &config, false).await?;
+    signed_in.onboarded = Some(true);
+    if signed_in.theme.is_none() {
+        signed_in.theme = config.theme;
     }
+    signed_in.save()?;
+    clear_screen();
+    Ok(signed_in)
 }
 
 pub fn choose_appearance(config: &mut Config) -> Result<()> {
@@ -320,6 +302,10 @@ where
                 }
                 Key::Digit(value) if (1..=choices.len()).contains(&value) => {
                     let next = value - 1;
+                    if matches!(style, SelectorStyle::Login) {
+                        println!();
+                        return Ok(Selection::Choice(next));
+                    }
                     if next != selected {
                         selected = next;
                         needs_render = true;
