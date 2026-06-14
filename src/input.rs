@@ -621,6 +621,7 @@ fn clear_composer_area(has_chrome: bool) {
     } else {
         print!("\r\x1b[J");
     }
+    print!("\r");
 }
 
 fn render_input_band(

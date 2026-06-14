@@ -16,6 +16,8 @@ const FLAVOR_MESSAGES: &[&str] = &[
 ];
 /// How many spinner frames before rotating to the next flavor message.
 const FRAMES_PER_FLAVOR: usize = 20;
+const STATUS_BLOCK_LINES: usize = 6;
+const DEFAULT_STATUS_WIDTH: usize = 120;
 
 pub struct TurnRenderer<'a> {
     terminal: &'a Terminal,
@@ -27,6 +29,8 @@ pub struct TurnRenderer<'a> {
     last_spinner_render: Option<Instant>,
     flavor_index: usize,
     prompt_text: String,
+    thinking_visible: bool,
+    status_block_rendered: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,6 +52,8 @@ impl<'a> TurnRenderer<'a> {
             last_spinner_render: None,
             flavor_index: 0,
             prompt_text: prompt.to_string(),
+            thinking_visible: true,
+            status_block_rendered: false,
         }
     }
 
@@ -68,8 +74,7 @@ impl<'a> TurnRenderer<'a> {
             println!();
         }
 
-        // Show initial thinking spinner
-        self.render_spinner_line();
+        self.render_status_block();
     }
 
     /// Called for each delta received from the streaming response.
@@ -104,8 +109,8 @@ impl<'a> TurnRenderer<'a> {
         if self.spinner_frame.is_multiple_of(FRAMES_PER_FLAVOR) {
             self.flavor_index = (self.flavor_index + 1) % FLAVOR_MESSAGES.len();
         }
-        self.clear_spinner_line();
-        self.render_spinner_line();
+        self.clear_status_block();
+        self.render_status_block();
         self.last_spinner_render = Some(now);
     }
 
@@ -121,6 +126,13 @@ impl<'a> TurnRenderer<'a> {
                     self.interrupted.store(true, Ordering::Relaxed);
                     return true;
                 }
+                if matches!(key.kind, KeyEventKind::Press) && key.code == KeyCode::Tab {
+                    self.thinking_visible = !self.thinking_visible;
+                    if self.state == TurnState::Thinking {
+                        self.clear_status_block();
+                        self.render_status_block();
+                    }
+                }
             }
         }
         false
@@ -130,7 +142,7 @@ impl<'a> TurnRenderer<'a> {
     pub fn finish(&mut self) {
         match self.state {
             TurnState::Thinking => {
-                self.clear_spinner_line();
+                self.clear_status_block();
                 let elapsed = self.started.elapsed();
                 println!(
                     "{}",
@@ -152,7 +164,7 @@ impl<'a> TurnRenderer<'a> {
     pub fn finish_interrupted(&mut self) {
         match self.state {
             TurnState::Thinking => {
-                self.clear_spinner_line();
+                self.clear_status_block();
             }
             TurnState::Streaming => {
                 println!();
@@ -168,7 +180,7 @@ impl<'a> TurnRenderer<'a> {
 
     fn transition_to_streaming(&mut self) {
         self.first_content_at = Some(Instant::now());
-        self.clear_spinner_line();
+        self.clear_status_block();
 
         // Show thinking time summary
         let thinking_secs = self.started.elapsed().as_secs_f64();
@@ -181,37 +193,72 @@ impl<'a> TurnRenderer<'a> {
             println!();
         }
 
-        // Print agent bullet prefix before streaming content
-        print!("{} ", self.terminal.agent_bullet());
-        let _ = io::stdout().flush();
-
         self.state = TurnState::Streaming;
     }
 
-    fn render_spinner_line(&self) {
+    fn render_status_block(&mut self) {
         let frame = SPINNER_FRAMES[self.spinner_frame % SPINNER_FRAMES.len()];
         let flavor = FLAVOR_MESSAGES[self.flavor_index % FLAVOR_MESSAGES.len()];
         let elapsed = self.started.elapsed();
         let secs = elapsed.as_secs();
 
-        let status = if secs >= 2 {
-            format!("esc to interrupt · {secs}s · next: stream response")
+        let thinking_line = if self.thinking_visible {
+            if secs >= 2 {
+                format!("∴ Thought for {secs}s")
+            } else {
+                "∴ Thinking...".to_string()
+            }
+        } else {
+            "∴ Thinking hidden".to_string()
+        };
+        let interrupt_hint = if secs >= 2 {
+            format!("esc to interrupt · {secs}s")
         } else {
             "esc to interrupt".to_string()
         };
+        let toggle = if self.thinking_visible {
+            "Thinking on (tab to toggle)"
+        } else {
+            "Thinking off (tab to toggle)"
+        };
+        let width = status_width();
+        let rule = "─".repeat(width);
 
-        let line = format!(
+        println!("{}", self.terminal.thinking_indicator(&thinking_line));
+        println!(
             "{} {} ({})",
-            self.terminal.spinner_text(frame),
+            self.terminal.spinner_text(&format!("{frame}")),
             self.terminal.spinner_text(flavor),
-            self.terminal.token_stats(&status)
+            self.terminal.token_stats(&interrupt_hint)
         );
-        print!("\r{line}\x1b[K");
+        println!("{}", self.terminal.token_stats(&rule));
+        println!("{}\x1b[K", self.terminal.composer_prompt());
+        println!("{}", self.terminal.token_stats(&rule));
+        print!("{}", right_aligned(toggle, width, self.terminal));
         let _ = io::stdout().flush();
+        self.status_block_rendered = true;
     }
 
-    fn clear_spinner_line(&self) {
-        print!("\r\x1b[K");
+    fn clear_status_block(&mut self) {
+        if self.status_block_rendered {
+            print!("\r\x1b[{}A\x1b[J", STATUS_BLOCK_LINES - 1);
+            self.status_block_rendered = false;
+        } else {
+            print!("\r\x1b[K");
+        }
         let _ = io::stdout().flush();
     }
+}
+
+fn status_width() -> usize {
+    crossterm::terminal::size()
+        .map(|(width, _)| width as usize)
+        .unwrap_or(DEFAULT_STATUS_WIDTH)
+        .saturating_sub(1)
+        .max(1)
+}
+
+fn right_aligned(value: &str, width: usize, terminal: &Terminal) -> String {
+    let padding = width.saturating_sub(value.chars().count());
+    format!("{}{}", " ".repeat(padding), terminal.token_stats(value))
 }

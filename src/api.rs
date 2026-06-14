@@ -254,18 +254,7 @@ impl CodeusClient {
             .filter(|value| !value.trim().is_empty());
         let proxy = self.config.api_base.trim().to_string();
 
-        let mut urls = Vec::new();
-        for base in [proxy].into_iter().chain(direct_gateway) {
-            let base = base.trim().trim_end_matches('/');
-            if base.is_empty() {
-                continue;
-            }
-            let url = format!("{base}/chat/completions");
-            if !urls.iter().any(|existing| existing == &url) {
-                urls.push(url);
-            }
-        }
-        urls
+        chat_gateway_urls_from(&proxy, direct_gateway.as_deref())
     }
 
     pub async fn begin_device_login(&self) -> Result<DeviceAuthorization> {
@@ -509,6 +498,21 @@ impl CodeusClient {
 
         serde_json::from_str(&text).with_context(|| format!("failed to parse {path} response"))
     }
+}
+
+fn chat_gateway_urls_from(proxy: &str, direct_gateway: Option<&str>) -> Vec<String> {
+    let mut urls = Vec::new();
+    for base in direct_gateway.into_iter().chain([proxy]) {
+        let base = base.trim().trim_end_matches('/');
+        if base.is_empty() {
+            continue;
+        }
+        let url = format!("{base}/chat/completions");
+        if !urls.iter().any(|existing| existing == &url) {
+            urls.push(url);
+        }
+    }
+    urls
 }
 
 fn parse_device_token_error(
@@ -1061,6 +1065,35 @@ mod tests {
 
         assert_eq!(token.session_token, "session-123");
         assert!(token.expires_in.is_some());
+    }
+
+    #[test]
+    fn chat_gateway_urls_prefer_direct_vercel_gateway_before_proxy() {
+        let urls = chat_gateway_urls_from(
+            "https://api.quantumclub.sh/v1",
+            Some("https://ai-gateway.vercel.sh/v1/"),
+        );
+
+        assert_eq!(
+            urls,
+            vec![
+                "https://ai-gateway.vercel.sh/v1/chat/completions",
+                "https://api.quantumclub.sh/v1/chat/completions",
+            ]
+        );
+    }
+
+    #[test]
+    fn chat_gateway_urls_dedupe_direct_gateway_matching_proxy() {
+        let urls = chat_gateway_urls_from(
+            "https://ai-gateway.vercel.sh/v1",
+            Some("https://ai-gateway.vercel.sh/v1/"),
+        );
+
+        assert_eq!(
+            urls,
+            vec!["https://ai-gateway.vercel.sh/v1/chat/completions"]
+        );
     }
 
     #[test]

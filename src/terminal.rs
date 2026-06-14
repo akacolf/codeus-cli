@@ -151,17 +151,9 @@ impl Terminal {
 
     pub fn thinking_indicator(&self, value: &str) -> String {
         if self.color {
-            format!("\x1b[2m\x1b[3m{}\x1b[0m", value)
+            format!("\x1b[2m{}\x1b[0m", value)
         } else {
             value.to_string()
-        }
-    }
-
-    pub fn agent_bullet(&self) -> String {
-        if self.color {
-            format!("{}\u{25CF}\x1b[0m", self.accent_code())
-        } else {
-            "●".to_string()
         }
     }
 
